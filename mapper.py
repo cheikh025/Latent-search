@@ -64,7 +64,17 @@ def train_mapper(df, mapper_model, optimizer, decoder_model, decoder_tokenizer, 
     code_list, z_list = get_mapper_training_data(df)
     dataset = list(zip(code_list, z_list))
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    scheduler =  torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+
+    # Use ReduceLROnPlateau for adaptive learning rate based on training loss
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',           # Minimize loss
+        factor=0.5,           # Reduce LR by half
+        patience=5,           # Wait 5 epochs before reducing
+        verbose=verbose,      # Print LR changes
+        min_lr=1e-7          # Don't go below this
+    )
+
     mapper_model.train()
     # Freeze decoder parameters but keep it in eval to disable dropout/etc.
     decoder_model.eval()
@@ -188,15 +198,22 @@ def train_mapper(df, mapper_model, optimizer, decoder_model, decoder_tokenizer, 
             if total_steps % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+
+        # Final step if we have accumulated gradients
         if total_steps % accumulation_steps != 0:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-        scheduler.step()
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        # Compute average training loss for this epoch
+        avg_train_loss = running / max(1, len(dataloader))
+        n = max(1, len(dataloader))
+
+        # Step scheduler with training loss
+        scheduler.step(avg_train_loss)
+
         torch.cuda.empty_cache()
         if verbose:
-            avg = running / max(1, len(dataloader))
-            n = max(1, len(dataloader))
-            print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {avg:.4f}  | CE : {running_ce/n :.4f}")
+            print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {avg_train_loss:.4f} | CE: {running_ce/n:.4f}")
         if epoch%5 ==0:
             Mapper_path = "Mapper_Checkpoints/Mapper.pth"
             torch.save(mapper_model.state_dict(), Mapper_path)
