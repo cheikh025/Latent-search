@@ -12,6 +12,7 @@ from sklearn.cluster import KMeans
 from tqdm.notebook import tqdm
 
 import ast
+from base.code import TextFunctionProgramConverter
 
 class CodeNormalizer(ast.NodeTransformer):
     """
@@ -172,10 +173,18 @@ class ProgramDatabase:
                 local_scope = {}
                 score = None
                 try:
+                    # Extract function name dynamically from the code
+                    function = TextFunctionProgramConverter.text_to_function(code_str)
+                    if function is None:
+                        raise ValueError("Could not parse function from code")
+                    function_name = function.name
+
+                    # Execute the code and get the function by its extracted name
                     exec(code_str, {"np": np}, local_scope)
-                    heuristic = local_scope['heuristic']
+                    callable_func = local_scope[function_name]
+
                     # Evaluate on all datasets and average the score
-                    score = eval.evaluate_program('_', heuristic)
+                    score = eval.evaluate_program('_', callable_func)
                 except Exception as e:
                     print(f"  - Could not evaluate function {func_name}. Error: {e}")
                     score = None
