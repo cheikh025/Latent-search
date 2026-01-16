@@ -110,17 +110,22 @@ class ProgramDatabase:
         z = np.squeeze(z)
                 
 
+        # Calculate mean score from array or use single value
+        if isinstance(score, (list, np.ndarray)):
+            score_array = np.array(score)
+            mean_score = float(np.nanmean(score_array)) if np.isfinite(score_array).any() else np.nan
+        else:
+            mean_score = float(score) if score is not None and np.isfinite(score) else np.nan
+
         row = {
             "program_id": pid,
             "code": code,
             "z": z,
-            "score": float(np.nanmean(score)) if np.isfinite(score).any() else np.nan,#score,
+            "score": mean_score,
             "origin": origin,
             "generation": generation,
         }
         self.df.loc[pid] = row
-        inst_cols = [f"score_{i}" for i in range(128)]
-        self.df.loc[pid, inst_cols] = score
         return pid
     def remove_program(self, program_id):
         # Remove the row with the given program_id
