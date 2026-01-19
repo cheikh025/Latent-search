@@ -14,36 +14,27 @@ from typing import Optional, Tuple
 
 class ScorePredictor(nn.Module):
     """
-    MLP that predicts score from prior-space vector u.
+    Simple 2-layer MLP that predicts score from prior-space vector u.
 
     R: R^d -> R
     score = R(u)
     """
 
-    def __init__(self, input_dim: int, hidden_dims=[512, 256, 128]):
+    def __init__(self, input_dim: int, hidden_dim: int = 256):
         """
         Args:
             input_dim: Dimension of prior space (same as latent dim)
-            hidden_dims: List of hidden layer dimensions
+            hidden_dim: Hidden layer dimension (default: 256)
         """
         super().__init__()
 
-        layers = []
-        prev_dim = input_dim
-
-        for hidden_dim in hidden_dims:
-            layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(0.1)
-            ])
-            prev_dim = hidden_dim
-
-        # Output layer
-        layers.append(nn.Linear(prev_dim, 1))
-
-        self.network = nn.Sequential(*layers)
+        # Simple 2-layer architecture
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 1)
+        )
 
     def forward(self, u: torch.Tensor) -> torch.Tensor:
         """
@@ -361,7 +352,7 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Create predictor
-    predictor = ScorePredictor(input_dim=dim, hidden_dims=[512, 256, 128])
+    predictor = ScorePredictor(input_dim=dim, hidden_dim=256)
     print(f"Created predictor with {sum(p.numel() for p in predictor.parameters()):,} parameters")
 
     # Test forward pass

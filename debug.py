@@ -8,6 +8,7 @@ from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 from mapper import Mapper, train_mapper
 from normalizing_flow import NormalizingFlow, train_flow, sample_from_flow
+from score_predictor import ScorePredictor, train_score_predictor, gradient_ascent_in_prior, adaptive_gradient_search
 import os
 
 
@@ -235,13 +236,9 @@ with torch.no_grad():
 # Decode the generated code
 reconstructed_code = decoder_tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
-# Extract only the code part (remove instruction if present)
-if "```python" in reconstructed_code:
-    # Extract code between ```python and ```
-    start_idx = reconstructed_code.find("```python") + len("```python")
-    end_idx = reconstructed_code.find("```", start_idx)
-    if end_idx != -1:
-        reconstructed_code = reconstructed_code[start_idx:end_idx].strip()
+# Extract only the code part using robust extraction (removes trailing comments/examples)
+from utils import extract_python_code_robust
+reconstructed_code = extract_python_code_robust(reconstructed_code, include_preface=True)
 
 print(reconstructed_code)
 print("-"*70)
@@ -398,3 +395,201 @@ torch.save({
     'hidden_dim': 512,
 }, flow_save_path)
 print(f"\nFlow model saved to {flow_save_path}")
+
+# ============================================================================
+# Train Score Predictor for Gradient-Based Search
+# ============================================================================
+print("\n" + "="*70)
+print("Training Score Predictor R(u)")
+print("="*70)
+
+# Create score predictor (simple 2-layer MLP)
+predictor = ScorePredictor(
+    input_dim=embedding_dim,
+    hidden_dim=256
+)
+
+num_predictor_params = sum(p.numel() for p in predictor.parameters())
+print(f"\nScore predictor created with {num_predictor_params:,} parameters")
+print(f"Architecture: {embedding_dim} -> 256 -> 1 (2-layer MLP)")
+
+# Create checkpoint directory
+os.makedirs("Predictor_Checkpoints", exist_ok=True)
+
+# Train the predictor
+print("\nStarting predictor training...")
+trained_predictor = train_score_predictor(
+    predictor=predictor,
+    program_db=program_db,
+    flow_model=trained_flow,
+    epochs=100,
+    batch_size=32,
+    lr=1e-3,
+    weight_decay=1e-4,
+    device=device,
+    verbose=True
+)
+
+print("\nPredictor training complete!")
+
+# ============================================================================
+# Test Score Predictor: Predict Scores
+# ============================================================================
+print("\n" + "="*70)
+print("Testing Score Predictor")
+print("="*70)
+
+trained_predictor.eval()
+
+# Test on known programs
+print("\nPredicting scores for known programs:")
+print("-"*70)
+
+test_indices = [0, 5, 10, 15, 20] if len(program_db.df) > 20 else list(range(min(5, len(program_db.df))))
+
+for test_idx in test_indices:
+    # Get z and true score
+    z_test = torch.tensor(
+        program_db.df.iloc[test_idx]['z'],
+        dtype=torch.float32
+    ).unsqueeze(0).to(device)
+
+    true_score = program_db.df.iloc[test_idx]['score']
+
+    with torch.no_grad():
+        # Map z to u
+        u_test, _ = trained_flow(z_test)
+
+        # Predict score
+        pred_score = trained_predictor(u_test)
+
+        # Denormalize if needed
+        if hasattr(trained_predictor, 'score_mean') and hasattr(trained_predictor, 'score_std'):
+            pred_score = pred_score * trained_predictor.score_std + trained_predictor.score_mean
+
+        pred_score = pred_score.item()
+
+    error = abs(pred_score - true_score)
+    print(f"\nProgram {test_idx}:")
+    print(f"  True score: {true_score:.4f}")
+    print(f"  Predicted:  {pred_score:.4f}")
+    print(f"  Error:      {error:.4f}")
+
+# Overall accuracy
+print("\n" + "-"*70)
+print("Overall Prediction Accuracy:")
+print("-"*70)
+
+all_z = torch.tensor(np.stack(program_db.df['z'].values), dtype=torch.float32).to(device)
+all_true_scores = program_db.df['score'].values
+
+with torch.no_grad():
+    all_u, _ = trained_flow(all_z)
+    all_pred_scores = trained_predictor(all_u)
+
+    if hasattr(trained_predictor, 'score_mean') and hasattr(trained_predictor, 'score_std'):
+        all_pred_scores = all_pred_scores * trained_predictor.score_std + trained_predictor.score_mean
+
+    all_pred_scores = all_pred_scores.squeeze().cpu().numpy()
+
+mae = np.mean(np.abs(all_pred_scores - all_true_scores))
+rmse = np.sqrt(np.mean((all_pred_scores - all_true_scores)**2))
+correlation = np.corrcoef(all_true_scores, all_pred_scores)[0, 1]
+
+print(f"\nMean Absolute Error (MAE): {mae:.4f}")
+print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+print(f"Correlation: {correlation:.4f}")
+
+# ============================================================================
+# Gradient Ascent in Prior Space
+# ============================================================================
+print("\n" + "="*70)
+print("Gradient Ascent to Find High-Scoring Regions")
+print("="*70)
+
+# Random initialization
+print("\n1. Random initialization (sample from N(0, I)):")
+print("-"*70)
+
+optimized_u_random, optimized_z_random = gradient_ascent_in_prior(
+    predictor=trained_predictor,
+    flow_model=trained_flow,
+    num_starts=5,
+    steps=100,
+    lr=0.01,
+    init_method='random',
+    device=device,
+    verbose=True
+)
+
+# Adaptive initialization (from top programs)
+print("\n" + "="*70)
+print("2. Adaptive gradient search (initialize from top programs):")
+print("-"*70)
+
+optimized_u_adaptive, optimized_z_adaptive = adaptive_gradient_search(
+    predictor=trained_predictor,
+    flow_model=trained_flow,
+    program_db=program_db,
+    num_searches=5,
+    steps_per_search=100,
+    lr=0.01,
+    init_from_top_k=5,
+    device=device,
+    verbose=True
+)
+
+# Compare strategies
+print("\n" + "="*70)
+print("Comparison: Random vs Adaptive Initialization")
+print("="*70)
+
+# Get predicted scores
+with torch.no_grad():
+    pred_random = trained_predictor(optimized_u_random)
+    pred_adaptive = trained_predictor(optimized_u_adaptive)
+
+    if hasattr(trained_predictor, 'score_mean') and hasattr(trained_predictor, 'score_std'):
+        pred_random = pred_random * trained_predictor.score_std + trained_predictor.score_mean
+        pred_adaptive = pred_adaptive * trained_predictor.score_std + trained_predictor.score_mean
+
+    pred_random = pred_random.squeeze().cpu().numpy()
+    pred_adaptive = pred_adaptive.squeeze().cpu().numpy()
+
+print("\nRandom initialization:")
+print(f"  Predicted scores: {pred_random}")
+print(f"  Mean: {pred_random.mean():.4f}, Max: {pred_random.max():.4f}")
+
+print("\nAdaptive initialization:")
+print(f"  Predicted scores: {pred_adaptive}")
+print(f"  Mean: {pred_adaptive.mean():.4f}, Max: {pred_adaptive.max():.4f}")
+
+print("\nTop 3 existing programs:")
+top_3 = program_db.get_top_n(3)
+print(f"  Scores: {top_3['score'].values}")
+
+# Save optimized z vectors for code generation
+print("\n" + "-"*70)
+print("Saving optimized latent vectors...")
+print("-"*70)
+
+torch.save({
+    'z_random': optimized_z_random.cpu(),
+    'z_adaptive': optimized_z_adaptive.cpu(),
+    'pred_scores_random': pred_random,
+    'pred_scores_adaptive': pred_adaptive
+}, "Predictor_Checkpoints/optimized_latents.pth")
+
+print("✓ Saved to 'Predictor_Checkpoints/optimized_latents.pth'")
+print("\nThese optimized z vectors can now be used to generate new candidate programs!")
+
+# Save the trained predictor
+predictor_save_path = "Predictor_Checkpoints/score_predictor.pth"
+torch.save({
+    'model_state_dict': trained_predictor.state_dict(),
+    'input_dim': embedding_dim,
+    'hidden_dim': 256,
+    'score_mean': trained_predictor.score_mean if hasattr(trained_predictor, 'score_mean') else None,
+    'score_std': trained_predictor.score_std if hasattr(trained_predictor, 'score_std') else None,
+}, predictor_save_path)
+print(f"\n✓ Predictor saved to {predictor_save_path}")

@@ -219,12 +219,12 @@ def evolutionary_search(
         print("✓ Crossover operator initialized")
 
     if search_strategy in ['gradient', 'hybrid']:
-        # Initialize score predictor
+        # Initialize score predictor (simple 2-layer MLP)
         score_predictor = ScorePredictor(
             input_dim=flow_model.dim,
-            hidden_dims=[512, 256, 128]
+            hidden_dim=256
         ).to(device)
-        print("✓ Score predictor initialized")
+        print("✓ Score predictor initialized (2-layer MLP)")
 
         # Train initial predictor
         print("\nTraining initial score predictor...")
@@ -382,6 +382,7 @@ def evolutionary_search(
 
                 # Evaluate (same pattern as programDB.load_func_from_json)
                 print("Evaluating...")
+                score = None
                 try:
                     # Execute the code and get the callable function
                     local_scope = {}
@@ -390,12 +391,27 @@ def evolutionary_search(
 
                     # Evaluate on all datasets
                     score = evaluator.evaluate_program('_', callable_func)
-                except Exception as e:
-                    print(f"❌ Evaluation error: {e}")
-                    score = None
 
-                if score is None or not np.isfinite(score):
-                    print("❌ Evaluation failed or returned invalid score")
+                    if score is None:
+                        print("❌ Evaluation returned None")
+                        failed += 1
+                        continue
+
+                    if not np.isfinite(score):
+                        print(f"❌ Non-finite score: {score}")
+                        failed += 1
+                        continue
+
+                except SyntaxError as e:
+                    print(f"❌ Syntax error during exec: {e}")
+                    failed += 1
+                    continue
+                except KeyError as e:
+                    print(f"❌ Function '{function_name}' not found in local scope")
+                    failed += 1
+                    continue
+                except Exception as e:
+                    print(f"❌ Evaluation error: {type(e).__name__}: {str(e)[:100]}")
                     failed += 1
                     continue
 
