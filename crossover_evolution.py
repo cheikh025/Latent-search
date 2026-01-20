@@ -21,6 +21,7 @@ from normalizing_flow import NormalizingFlow, sample_from_flow
 from crossover import PriorSpaceCrossover
 from utils import extract_python_code_robust, is_valid_python
 from base.code import TextFunctionProgramConverter
+from base.evaluate import SecureEvaluator
 import os
 import json
 
@@ -185,6 +186,10 @@ def crossover_evolution(
     crossover_op = PriorSpaceCrossover(flow_model, device=device)
     print("✓ Crossover operator initialized")
 
+    # Create secure evaluator wrapper
+    secure_eval = SecureEvaluator(evaluator, debug_mode=False)
+    print("✓ Secure evaluator initialized")
+
     print(f"\nStarting crossover-based evolution with {len(program_db)} initial programs")
     print(f"Best initial score: {program_db.df['score'].max():.4f}")
     print(f"Average initial score: {program_db.df['score'].mean():.4f}")
@@ -281,15 +286,10 @@ def crossover_evolution(
                     failed += 1
                     continue
 
-                # Evaluate
+                # Evaluate using secure evaluator
                 print("Evaluating...")
-                score = None
                 try:
-                    local_scope = {}
-                    exec(clean_code, {"np": np}, local_scope)
-                    callable_func = local_scope[function_name]
-
-                    score = evaluator.evaluate_program('_', callable_func)
+                    score = secure_eval.evaluate_program(clean_code)
 
                     if score is None:
                         print("❌ Evaluation returned None")

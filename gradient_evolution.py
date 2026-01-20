@@ -20,6 +20,7 @@ from normalizing_flow import NormalizingFlow, sample_from_flow
 from score_predictor import ScorePredictor, train_score_predictor, adaptive_gradient_search
 from utils import extract_python_code_robust, is_valid_python
 from base.code import TextFunctionProgramConverter
+from base.evaluate import SecureEvaluator
 import os
 import json
 
@@ -192,6 +193,10 @@ def gradient_evolution(
     ).to(device)
     print("✓ Score predictor initialized (2-layer MLP)")
 
+    # Create secure evaluator wrapper
+    secure_eval = SecureEvaluator(evaluator, debug_mode=False)
+    print("✓ Secure evaluator initialized")
+
     # Train initial predictor
     print("\nTraining initial score predictor...")
     score_predictor = train_score_predictor(
@@ -319,15 +324,10 @@ def gradient_evolution(
                     failed += 1
                     continue
 
-                # Evaluate
+                # Evaluate using secure evaluator
                 print("Evaluating...")
-                score = None
                 try:
-                    local_scope = {}
-                    exec(clean_code, {"np": np}, local_scope)
-                    callable_func = local_scope[function_name]
-
-                    score = evaluator.evaluate_program('_', callable_func)
+                    score = secure_eval.evaluate_program(clean_code)
 
                     if score is None:
                         print("❌ Evaluation returned None")

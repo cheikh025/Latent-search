@@ -13,6 +13,7 @@ from tqdm.notebook import tqdm
 
 import ast
 from base.code import TextFunctionProgramConverter
+from base.evaluate import SecureEvaluator
 
 class CodeNormalizer(ast.NodeTransformer):
     """
@@ -170,26 +171,18 @@ class ProgramDatabase:
         Initialize the database from a JSON file of function name: code.
         Each code is encoded using encoder_model and encoder_tokenizer.
         """
+        # Create secure evaluator wrapper
+        secure_eval = SecureEvaluator(eval, debug_mode=False)
+
         with open(json_path, "r") as f:
             func_dict = json.load(f)
         for func_name, code_str in tqdm(func_dict.items(), desc="Processing"):
             with torch.no_grad():
                 z = encoder_model.encode([code_str])[0]
-                local_scope = {}
                 score = None
                 try:
-                    # Extract function name dynamically from the code
-                    function = TextFunctionProgramConverter.text_to_function(code_str)
-                    if function is None:
-                        raise ValueError("Could not parse function from code")
-                    function_name = function.name
-
-                    # Execute the code and get the function by its extracted name
-                    exec(code_str, {"np": np}, local_scope)
-                    callable_func = local_scope[function_name]
-
-                    # Evaluate on all datasets and average the score
-                    score = eval.evaluate_program('_', callable_func)
+                    # Use secure evaluation (handles exec, timeout, and process isolation)
+                    score = secure_eval.evaluate_program(code_str)
                 except Exception as e:
                     print(f"  - Could not evaluate function {func_name}. Error: {e}")
                     score = None
