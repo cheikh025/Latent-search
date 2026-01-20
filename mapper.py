@@ -44,14 +44,14 @@ def sample_prompts_batch_fixed(batch_size):
     Returns a batch of randomly sampled instruction prompts for code generation.
     """
     prompts = [
-        "Write a Python function that implements a heuristic algorithm.",
-        "Create a heuristic function in Python.",
-        "Implement a heuristic algorithm as a Python function.",
-        "Generate a Python function for a heuristic solution.",
-        "Write a heuristic function in Python to solve the problem.",
-        "Develop a Python heuristic algorithm function.",
-        "Create a Python function implementing a heuristic approach.",
-        "Write a Python heuristic function.",
+        "Implement the heuristic logic described above as a Python function.",
+        "Convert the preceding algorithmic idea into Python code.",
+        "Write a Python function that realizes the strategy defined in the context.",
+        "Translate the above heuristic concept into executable Python.",
+        "Based on the provided logic, write a Python heuristic function.",
+        "Implement this specific algorithmic approach in Python.",
+        "Realize the preceding abstract strategy as a Python function.",
+        "Write the Python code for the heuristic described by the soft prompts.",
     ]
     return [random.choice(prompts) for _ in range(batch_size)]
 

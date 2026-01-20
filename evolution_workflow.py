@@ -515,7 +515,7 @@ def main():
         return
 
     # Define skeleton prompt
-    skeleton_prompt = "Write a Python function that implements a heuristic for the Traveling Salesman Problem."
+    skeleton_prompt = "Implement the heuristic logic described above for the Traveling Salesman Problem."
 
     # ===== RUN EVOLUTIONARY SEARCH =====
     print("\n" + "="*70)
