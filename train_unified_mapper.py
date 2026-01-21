@@ -4,12 +4,27 @@ Unified Multi-Task Mapper Training
 Trains a single mapper on augmented heuristics from all combinatorial optimization tasks.
 This enables the mapper to learn universal latent-to-prompt transformations across:
 - TSP, CVRP, VRPTW, JSSP, Knapsack, Bin Packing, QAP, CFLP, Set Cover, Admissible Set
+
+Usage:
+    # Train from scratch
+    python train_unified_mapper.py
+
+    # Resume from checkpoint
+    python train_unified_mapper.py --resume Mapper_Checkpoints/unified_mapper.pth
+    python train_unified_mapper.py --resume Mapper_Checkpoints/unified_mapper_epoch25.pth
+
+Checkpoints are saved every 5 epochs and contain:
+- Model state (mapper weights)
+- Optimizer state (Adam momentum, etc.)
+- Scheduler state (learning rate schedule)
+- Training metadata (epoch, input/output dims, task info)
 """
 
 import os
 import json
 import glob
 import warnings
+import argparse
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
@@ -258,6 +273,75 @@ def encode_all_heuristics(
 
 
 # ============================================================================
+# Checkpoint Loading Function
+# ============================================================================
+
+def load_checkpoint_for_resume(checkpoint_path: str, mapper_model, optimizer=None, scheduler=None):
+    """
+    Load checkpoint for resuming training.
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        mapper_model: Mapper model instance to load state into
+        optimizer: Optional optimizer to load state into
+        scheduler: Optional scheduler to load state into
+
+    Returns:
+        Tuple of (start_epoch, checkpoint_metadata)
+    """
+    print(f"\n{'='*70}")
+    print(f"Loading Checkpoint for Resume Training")
+    print(f"{'='*70}\n")
+
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    # Load model state
+    mapper_model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"✓ Loaded model state from: {checkpoint_path}")
+
+    # Load optimizer state if available
+    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"✓ Loaded optimizer state")
+    elif optimizer is not None:
+        print(f"⚠ Optimizer state not found in checkpoint, reinitializing")
+
+    # Load scheduler state if available
+    if scheduler is not None and 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        print(f"✓ Loaded scheduler state")
+    elif scheduler is not None:
+        print(f"⚠ Scheduler state not found in checkpoint, reinitializing")
+
+    # Get starting epoch
+    start_epoch = checkpoint.get('epoch', 0)
+
+    # Print checkpoint metadata
+    print(f"\nCheckpoint Metadata:")
+    print(f"  Epoch: {start_epoch}")
+    print(f"  Total programs: {checkpoint.get('total_programs', 'N/A')}")
+    print(f"  Tasks trained: {len(checkpoint.get('tasks_trained', []))}")
+    print(f"  Model input dim: {checkpoint.get('input_dim', 'N/A')}")
+    print(f"  Model output dim: {checkpoint.get('output_dim', 'N/A')}")
+    print(f"  Num tokens: {checkpoint.get('num_tokens', 'N/A')}")
+
+    if 'prompt_augmentation' in checkpoint:
+        print(f"\nPrompt Augmentation Strategy:")
+        aug = checkpoint['prompt_augmentation']
+        print(f"  Strategy: {aug.get('strategy', 'N/A')}")
+        print(f"  Task-specific: {aug.get('task_specific_prob', 0)*100:.0f}%")
+        print(f"  Problem-class: {aug.get('problem_class_prob', 0)*100:.0f}%")
+        print(f"  General: {aug.get('general_prob', 0)*100:.0f}%")
+
+    print(f"{'='*70}\n")
+
+    return start_epoch, checkpoint
+
+
+# ============================================================================
 # Custom Collate Function for Multi-Task Training
 # ============================================================================
 
@@ -297,7 +381,9 @@ def train_unified_mapper(
     task_specific_prob: float = 0.60,
     problem_class_prob: float = 0.20,
     general_prob: float = 0.20,
-    seed: int = 42
+    seed: int = 42,
+    start_epoch: int = 0,
+    scheduler=None
 ):
     """
     Train mapper on unified multi-task dataset with prompt augmentation.
@@ -316,7 +402,7 @@ def train_unified_mapper(
         decoder_model: Frozen decoder (Qwen2.5-Coder-7B)
         decoder_tokenizer: Decoder tokenizer
         batch_size: Batch size for training
-        epochs: Number of training epochs
+        epochs: Number of training epochs (total, not additional)
         accumulation_steps: Gradient accumulation steps
         max_length: Max sequence length for tokenization
         verbose: Whether to print training progress
@@ -325,6 +411,8 @@ def train_unified_mapper(
         problem_class_prob: Probability of using problem-class prompt (default: 0.20)
         general_prob: Probability of using fully general prompt (default: 0.20)
         seed: Random seed for prompt sampling reproducibility
+        start_epoch: Starting epoch number for resume training (default: 0)
+        scheduler: Optional learning rate scheduler to save/restore state
     """
     from torch.utils.data import DataLoader
 
@@ -352,14 +440,15 @@ def train_unified_mapper(
     # Initialize RNG for prompt sampling
     rng = np.random.default_rng(seed)
 
-    # Setup scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-7
-    )
+    # Setup scheduler if not provided (for backwards compatibility)
+    if scheduler is None:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7
+        )
 
     # Freeze decoder and get device
     mapper_model.train()
@@ -380,7 +469,7 @@ def train_unified_mapper(
     # Training loop
     print(f"Training Configuration:")
     print(f"  Batch size: {batch_size}")
-    print(f"  Epochs: {epochs}")
+    print(f"  Epochs: {start_epoch} → {epochs}")
     print(f"  Accumulation steps: {accumulation_steps}")
     print(f"  Learning rate: {optimizer.param_groups[0]['lr']}")
     print(f"  Total programs: {len(dataset)}")
@@ -389,9 +478,11 @@ def train_unified_mapper(
     print(f"  Task-specific:   {task_specific_prob*100:.0f}%")
     print(f"  Problem-class:   {problem_class_prob*100:.0f}%")
     print(f"  General:         {general_prob*100:.0f}%")
+    if start_epoch > 0:
+        print(f"\n⚠ Resuming from epoch {start_epoch}")
     print(f"\nStarting training...\n")
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         total_steps = 0
         optimizer.zero_grad(set_to_none=True)
         running_loss = torch.tensor(0.0, device=first_dev)
@@ -510,7 +601,14 @@ def train_unified_mapper(
         # Save checkpoint every 5 epochs
         if (epoch + 1) % 5 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f"unified_mapper_epoch{epoch+1}.pth")
-            torch.save(mapper_model.state_dict(), checkpoint_path)
+            checkpoint_data = {
+                'model_state_dict': mapper_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch + 1,
+            }
+            if scheduler is not None:
+                checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+            torch.save(checkpoint_data, checkpoint_path)
             if verbose:
                 print(f"  ✓ Checkpoint saved: {checkpoint_path}")
 
@@ -522,8 +620,13 @@ def train_unified_mapper(
 # Main Training Script
 # ============================================================================
 
-def main():
-    """Main training pipeline for unified multi-task mapper."""
+def main(resume_checkpoint: Optional[str] = None):
+    """
+    Main training pipeline for unified multi-task mapper.
+
+    Args:
+        resume_checkpoint: Optional path to checkpoint file to resume training from
+    """
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nUsing device: {device}\n")
@@ -627,21 +730,42 @@ def main():
     print(f"  Parameters: {num_params:,}\n")
 
     # ========================================================================
-    # Step 6: Setup Optimizer
+    # Step 6: Setup Optimizer and Scheduler
     # ========================================================================
 
     learning_rate = 1e-4
     optimizer = torch.optim.AdamW(mapper_model.parameters(), lr=learning_rate)
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=5,
+        min_lr=1e-7
+    )
+
     # ========================================================================
-    # Step 7: Create Checkpoint Directory
+    # Step 7: Load Checkpoint if Resuming
+    # ========================================================================
+
+    start_epoch = 0
+    if resume_checkpoint is not None:
+        start_epoch, checkpoint_metadata = load_checkpoint_for_resume(
+            checkpoint_path=resume_checkpoint,
+            mapper_model=mapper_model,
+            optimizer=optimizer,
+            scheduler=scheduler
+        )
+
+    # ========================================================================
+    # Step 8: Create Checkpoint Directory
     # ========================================================================
 
     checkpoint_dir = "Mapper_Checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     # ========================================================================
-    # Step 8: Train Unified Mapper
+    # Step 9: Train Unified Mapper
     # ========================================================================
 
     trained_mapper = train_unified_mapper(
@@ -655,11 +779,13 @@ def main():
         accumulation_steps=2,
         max_length=2048,
         verbose=True,
-        checkpoint_dir=checkpoint_dir
+        checkpoint_dir=checkpoint_dir,
+        start_epoch=start_epoch,
+        scheduler=scheduler
     )
 
     # ========================================================================
-    # Step 9: Save Final Checkpoint with Metadata
+    # Step 10: Save Final Checkpoint with Metadata
     # ========================================================================
 
     print(f"\n{'='*70}")
@@ -670,6 +796,8 @@ def main():
 
     checkpoint_data = {
         'model_state_dict': trained_mapper.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
         'input_dim': input_dim,
         'output_dim': output_dim,
         'num_tokens': num_tokens,
@@ -703,4 +831,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Train unified multi-task mapper with optional resume support"
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint file to resume training from (e.g., Mapper_Checkpoints/unified_mapper.pth)"
+    )
+    args = parser.parse_args()
+
+    main(resume_checkpoint=args.resume)
