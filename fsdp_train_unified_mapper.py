@@ -151,7 +151,7 @@ def train_unified_mapper_fsdp(
     for epoch in range(epochs):
         sampler.set_epoch(epoch)
         optimizer.zero_grad(set_to_none=True)
-        running_loss = 0.0
+        running_loss = torch.tensor(0.0, device=device)
         total_steps = 0
 
         for step, (code_batch, z_batch, task_batch) in enumerate(dataloader):
@@ -249,7 +249,7 @@ def train_unified_mapper_fsdp(
                 loss = out.loss / accumulation_steps
                 loss.backward()
 
-            running_loss += loss.item()
+            running_loss += loss.detach()
             total_steps += 1
 
             if sync_grad:
@@ -260,10 +260,9 @@ def train_unified_mapper_fsdp(
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        loss_tensor = torch.tensor(running_loss, device=device)
         if dist.is_initialized():
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        avg_loss = loss_tensor.item() / world_size / max(1, len(dataloader))
+            dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
+        avg_loss = running_loss.item() / world_size / max(1, len(dataloader))
 
         scheduler.step(avg_loss)
         torch.cuda.empty_cache()
