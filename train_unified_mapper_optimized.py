@@ -272,7 +272,7 @@ def train_unified_mapper_optimized(
     batch_size: int = 16,           # Increased from 4
     epochs: int = 30,
     accumulation_steps: int = 1,    # Reduced from 2 (larger batch eliminates need)
-    max_length: Optional[int] = 2048,
+    max_length: Optional[int] = 1024,
     verbose: bool = True,
     checkpoint_dir: str = "Mapper_Checkpoints",
     task_specific_prob: float = 0.60,
@@ -591,15 +591,16 @@ def main(resume_checkpoint: Optional[str] = None):
         num_tokens=num_tokens
     )
 
-    # Compile mapper for additional speedup
-    mapper_model = torch.compile(mapper_model, mode="reduce-overhead")
+    # Note: torch.compile with "reduce-overhead" uses CUDA graphs which conflict
+    # with gradient checkpointing. Use "default" mode instead for compatibility.
+    mapper_model = torch.compile(mapper_model, mode="default")
 
     num_params = sum(p.numel() for p in mapper_model.parameters())
     print(f"Mapper Architecture:")
     print(f"  Input: {input_dim}D (code embeddings)")
     print(f"  Output: {num_tokens} tokens x {output_dim}D (soft prompts)")
     print(f"  Parameters: {num_params:,}")
-    print(f"  torch.compile: enabled (reduce-overhead mode)\n")
+    print(f"  torch.compile: enabled (default mode)\n")
 
     # ========================================================================
     # Step 6: Setup Optimizer and Scheduler
@@ -645,7 +646,7 @@ def main(resume_checkpoint: Optional[str] = None):
         batch_size=8,               # Reduced to avoid OOM on logits tensor
         epochs=30,
         accumulation_steps=2,       # Effective batch = 16
-        max_length=2048,            # Reduced to save memory
+        max_length=1024,            # Reduced to save memory
         verbose=True,
         checkpoint_dir=checkpoint_dir,
         start_epoch=start_epoch,
@@ -677,11 +678,11 @@ def main(resume_checkpoint: Optional[str] = None):
         'optimizations': {
             'flash_attention_2': True,
             'gradient_checkpointing': True,
-            'torch_compile': True,
+            'torch_compile': 'default',
             'batch_size': 8,
             'accumulation_steps': 2,
             'effective_batch_size': 16,
-            'max_length': 2048,
+            'max_length': 1024,
             'num_workers': 12,
             'prefetch_factor': 4,
         },
@@ -705,7 +706,7 @@ def main(resume_checkpoint: Optional[str] = None):
     print(f"  Tasks trained: {len(set(unified_df['task']))}")
     print(f"  Model parameters: {num_params:,}")
     print(f"  Decoder: Qwen3-4B-Instruct-2507")
-    print(f"  Optimizations: Flash Attention 2, Gradient Checkpointing, torch.compile")
+    print(f"  Optimizations: Flash Attention 2, Gradient Checkpointing, torch.compile(default)")
     print(f"  Batch: 8 x 2 accumulation = 16 effective")
     print(f"  Checkpoint: {final_path}")
     print()
