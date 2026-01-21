@@ -1,23 +1,17 @@
 """
-Unified Multi-Task Mapper Training
+Optimized Unified Multi-Task Mapper Training
 
-Trains a single mapper on augmented heuristics from all combinatorial optimization tasks.
-This enables the mapper to learn universal latent-to-prompt transformations across:
-- TSP, CVRP, VRPTW, JSSP, Knapsack, Bin Packing, QAP, CFLP, Set Cover, Admissible Set
+Optimizations for RTX 6000 Pro (96GB VRAM):
+- Larger batch size (16) with no gradient accumulation
+- Flash Attention 2 for 2-3x attention speedup
+- torch.compile() for 10-30% overall speedup
+- Increased DataLoader parallelism (12 workers, prefetch_factor=4)
+- Reduced GPU-CPU synchronization
+- Uses Qwen3-4B-Instruct-2507 decoder (smaller, faster)
 
 Usage:
-    # Train from scratch
-    python train_unified_mapper.py
-
-    # Resume from checkpoint
-    python train_unified_mapper.py --resume Mapper_Checkpoints/unified_mapper.pth
-    python train_unified_mapper.py --resume Mapper_Checkpoints/unified_mapper_epoch25.pth
-
-Checkpoints are saved every 5 epochs and contain:
-- Model state (mapper weights)
-- Optimizer state (Adam momentum, etc.)
-- Scheduler state (learning rate schedule)
-- Training metadata (epoch, input/output dims, task info)
+    python train_unified_mapper_optimized.py
+    python train_unified_mapper_optimized.py --resume Mapper_Checkpoints/unified_mapper_optimized.pth
 """
 
 import os
@@ -26,7 +20,7 @@ import glob
 import warnings
 import argparse
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Optional
 
 import torch
 import pandas as pd
@@ -35,7 +29,7 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 
-from mapper import Mapper, train_mapper
+from mapper import Mapper
 from utils import is_valid_python
 
 
@@ -86,36 +80,15 @@ def sample_prompt_with_augmentation(
     general_prob: float = 0.20,
     rng: Optional[np.random.Generator] = None
 ) -> str:
-    """
-    Sample a prompt using augmentation strategy for robustness.
-
-    Strategy 1: Prompt Augmentation
-    - 60% task-specific (e.g., "Write TSP heuristic")
-    - 20% problem-class general (e.g., "Write combinatorial optimization heuristic")
-    - 20% fully general (e.g., "Write a Python function")
-
-    This forces the mapper to rely on latent z for reconstruction, not the prompt.
-
-    Args:
-        task_name: Name of the task (e.g., 'tsp_construct')
-        task_specific_prob: Probability of using task-specific prompt
-        problem_class_prob: Probability of using problem-class prompt
-        general_prob: Probability of using fully general prompt
-        rng: Random number generator (for reproducibility)
-
-    Returns:
-        Sampled prompt string
-    """
+    """Sample a prompt using augmentation strategy for robustness."""
     if rng is None:
         rng = np.random.default_rng()
 
-    # Normalize probabilities
     total = task_specific_prob + problem_class_prob + general_prob
     task_specific_prob /= total
     problem_class_prob /= total
     general_prob /= total
 
-    # Sample prompt type
     choice = rng.choice(
         ['task_specific', 'problem_class', 'general'],
         p=[task_specific_prob, problem_class_prob, general_prob]
@@ -125,7 +98,7 @@ def sample_prompt_with_augmentation(
         return TASK_PROMPTS.get(task_name, PROBLEM_CLASS_PROMPTS[0])
     elif choice == 'problem_class':
         return rng.choice(PROBLEM_CLASS_PROMPTS)
-    else:  # general
+    else:
         return rng.choice(GENERAL_PROMPTS)
 
 
@@ -134,15 +107,7 @@ def sample_prompt_with_augmentation(
 # ============================================================================
 
 def load_all_augmented_heuristics(task_dir: str = "task") -> List[Tuple[str, str, str, str]]:
-    """
-    Load all augmented heuristics from all tasks.
-
-    Args:
-        task_dir: Root directory containing task subdirectories
-
-    Returns:
-        List of (code, task_name, skeleton_prompt, heuristic_name) tuples
-    """
+    """Load all augmented heuristics from all tasks."""
     all_heuristics = []
     augmented_files = glob.glob(os.path.join(task_dir, "*", "augmented.json"))
 
@@ -153,14 +118,12 @@ def load_all_augmented_heuristics(task_dir: str = "task") -> List[Tuple[str, str
 
     for aug_file in sorted(augmented_files):
         task_name = Path(aug_file).parent.name
-
-        # Get task-specific prompt
         skeleton_prompt = TASK_PROMPTS.get(task_name)
+
         if skeleton_prompt is None:
             warnings.warn(f"No skeleton prompt defined for task '{task_name}', skipping...")
             continue
 
-        # Load augmented heuristics JSON
         try:
             with open(aug_file, 'r', encoding='utf-8') as f:
                 heuristics_dict = json.load(f)
@@ -168,23 +131,17 @@ def load_all_augmented_heuristics(task_dir: str = "task") -> List[Tuple[str, str
             warnings.warn(f"Failed to load {aug_file}: {e}")
             continue
 
-        # Check if empty
         if not heuristics_dict:
             warnings.warn(f"Empty augmented.json for task '{task_name}', skipping...")
             continue
 
-        # Validate and add heuristics
         valid_count = 0
         for heuristic_name, code in heuristics_dict.items():
-            # Basic validation
             if not code or not isinstance(code, str):
                 continue
-
-            # Optional: validate Python syntax
             if not is_valid_python(code):
                 warnings.warn(f"Invalid Python syntax in {task_name}/{heuristic_name}, skipping...")
                 continue
-
             all_heuristics.append((code, task_name, skeleton_prompt, heuristic_name))
             valid_count += 1
 
@@ -200,23 +157,10 @@ def load_all_augmented_heuristics(task_dir: str = "task") -> List[Tuple[str, str
 def encode_all_heuristics(
     heuristics_list: List[Tuple[str, str, str, str]],
     encoder_model: SentenceTransformer,
-    encoder_tokenizer,
     device: str = "cuda",
-    batch_size: int = 32
+    batch_size: int = 64  # Increased for faster encoding
 ) -> pd.DataFrame:
-    """
-    Encode all heuristics using the code encoder.
-
-    Args:
-        heuristics_list: List of (code, task, prompt, name) tuples
-        encoder_model: SentenceTransformer encoder model
-        encoder_tokenizer: Encoder tokenizer
-        device: Device for encoding
-        batch_size: Batch size for encoding
-
-    Returns:
-        DataFrame with columns: ['code', 'z', 'task', 'skeleton_prompt', 'heuristic_name']
-    """
+    """Encode all heuristics using the code encoder."""
     print(f"\n{'='*70}")
     print(f"Encoding All Heuristics")
     print(f"{'='*70}\n")
@@ -226,7 +170,6 @@ def encode_all_heuristics(
     prompts = [h[2] for h in heuristics_list]
     names = [h[3] for h in heuristics_list]
 
-    # Batch encode
     print(f"Encoding {len(codes)} programs in batches of {batch_size}...")
     embeddings = []
 
@@ -246,20 +189,17 @@ def encode_all_heuristics(
 
     embeddings = np.vstack(embeddings)
 
-    print(f"\n✓ Encoded all programs")
+    print(f"\n Encoded all programs")
     print(f"  Embedding shape: {embeddings.shape}")
-    print(f"  Embedding dimension: {embeddings.shape[1]}")
 
-    # Create DataFrame
     df = pd.DataFrame({
         'code': codes,
-        'z': list(embeddings),  # Store as list of numpy arrays
+        'z': list(embeddings),
         'task': tasks,
         'skeleton_prompt': prompts,
         'heuristic_name': names
     })
 
-    # Print statistics
     print(f"\nDataset Statistics:")
     print(f"{'='*70}")
     task_counts = df['task'].value_counts().sort_index()
@@ -271,22 +211,11 @@ def encode_all_heuristics(
 
 
 # ============================================================================
-# Checkpoint Loading Function
+# Checkpoint Loading
 # ============================================================================
 
 def load_checkpoint_for_resume(checkpoint_path: str, mapper_model, optimizer=None, scheduler=None):
-    """
-    Load checkpoint for resuming training.
-
-    Args:
-        checkpoint_path: Path to the checkpoint file
-        mapper_model: Mapper model instance to load state into
-        optimizer: Optional optimizer to load state into
-        scheduler: Optional scheduler to load state into
-
-    Returns:
-        Tuple of (start_epoch, checkpoint_metadata)
-    """
+    """Load checkpoint for resuming training."""
     print(f"\n{'='*70}")
     print(f"Loading Checkpoint for Resume Training")
     print(f"{'='*70}\n")
@@ -295,84 +224,50 @@ def load_checkpoint_for_resume(checkpoint_path: str, mapper_model, optimizer=Non
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
-
-    # Load model state
     mapper_model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"✓ Loaded model state from: {checkpoint_path}")
+    print(f"Loaded model state from: {checkpoint_path}")
 
-    # Load optimizer state if available
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        print(f"✓ Loaded optimizer state")
-    elif optimizer is not None:
-        print(f"⚠ Optimizer state not found in checkpoint, reinitializing")
+        print(f"Loaded optimizer state")
 
-    # Load scheduler state if available
     if scheduler is not None and 'scheduler_state_dict' in checkpoint:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        print(f"✓ Loaded scheduler state")
-    elif scheduler is not None:
-        print(f"⚠ Scheduler state not found in checkpoint, reinitializing")
+        print(f"Loaded scheduler state")
 
-    # Get starting epoch
     start_epoch = checkpoint.get('epoch', 0)
-
-    # Print checkpoint metadata
     print(f"\nCheckpoint Metadata:")
     print(f"  Epoch: {start_epoch}")
     print(f"  Total programs: {checkpoint.get('total_programs', 'N/A')}")
-    print(f"  Tasks trained: {len(checkpoint.get('tasks_trained', []))}")
-    print(f"  Model input dim: {checkpoint.get('input_dim', 'N/A')}")
-    print(f"  Model output dim: {checkpoint.get('output_dim', 'N/A')}")
-    print(f"  Num tokens: {checkpoint.get('num_tokens', 'N/A')}")
-
-    if 'prompt_augmentation' in checkpoint:
-        print(f"\nPrompt Augmentation Strategy:")
-        aug = checkpoint['prompt_augmentation']
-        print(f"  Strategy: {aug.get('strategy', 'N/A')}")
-        print(f"  Task-specific: {aug.get('task_specific_prob', 0)*100:.0f}%")
-        print(f"  Problem-class: {aug.get('problem_class_prob', 0)*100:.0f}%")
-        print(f"  General: {aug.get('general_prob', 0)*100:.0f}%")
-
     print(f"{'='*70}\n")
 
     return start_epoch, checkpoint
 
 
 # ============================================================================
-# Custom Collate Function for Multi-Task Training
+# Custom Collate Function
 # ============================================================================
 
 def multi_task_collate_fn(batch):
-    """
-    Collate function that handles per-sample data with task names.
-
-    Args:
-        batch: List of (code, z, task_name) tuples
-
-    Returns:
-        codes: List of code strings
-        zs: Tensor of embeddings [batch_size, embedding_dim]
-        task_names: List of task name strings
-    """
+    """Collate function that handles per-sample data with task names."""
     codes, zs, task_names = zip(*batch)
     zs = torch.tensor(np.stack(zs), dtype=torch.float32)
     return list(codes), zs, list(task_names)
 
 
 # ============================================================================
-# Modified Training Function for Multi-Task Mapper
+# Optimized Training Function
 # ============================================================================
 
-def train_unified_mapper(
+def train_unified_mapper_optimized(
     df: pd.DataFrame,
     mapper_model,
     optimizer,
     decoder_model,
     decoder_tokenizer,
-    batch_size: int = 4,
+    batch_size: int = 16,           # Increased from 4
     epochs: int = 30,
-    accumulation_steps: int = 2,
+    accumulation_steps: int = 1,    # Reduced from 2 (larger batch eliminates need)
     max_length: Optional[int] = 2048,
     verbose: bool = True,
     checkpoint_dir: str = "Mapper_Checkpoints",
@@ -384,71 +279,50 @@ def train_unified_mapper(
     scheduler=None
 ):
     """
-    Train mapper on unified multi-task dataset with prompt augmentation.
+    Optimized training for unified multi-task mapper.
 
-    This uses Strategy 1: Prompt Augmentation for robustness.
-    - 60% task-specific prompts (e.g., "Write TSP heuristic")
-    - 20% problem-class prompts (e.g., "Write combinatorial optimization heuristic")
-    - 20% general prompts (e.g., "Write a Python function")
-
-    This forces the mapper to rely on latent z for reconstruction, not the prompt.
-
-    Args:
-        df: DataFrame with columns ['code', 'z', 'task', ...]
-        mapper_model: Mapper model instance
-        optimizer: Optimizer for mapper parameters
-        decoder_model: Frozen decoder (Qwen2.5-Coder-7B)
-        decoder_tokenizer: Decoder tokenizer
-        batch_size: Batch size for training
-        epochs: Number of training epochs (total, not additional)
-        accumulation_steps: Gradient accumulation steps
-        max_length: Max sequence length for tokenization
-        verbose: Whether to print training progress
-        checkpoint_dir: Directory to save checkpoints
-        task_specific_prob: Probability of using task-specific prompt (default: 0.60)
-        problem_class_prob: Probability of using problem-class prompt (default: 0.20)
-        general_prob: Probability of using fully general prompt (default: 0.20)
-        seed: Random seed for prompt sampling reproducibility
-        start_epoch: Starting epoch number for resume training (default: 0)
-        scheduler: Optional learning rate scheduler to save/restore state
+    Optimizations:
+    - Larger batch size (16) for better GPU utilization
+    - No gradient accumulation needed with larger batches
+    - Increased DataLoader workers and prefetching
+    - Reduced GPU-CPU synchronization (loss accumulation on GPU)
+    - torch.cuda.empty_cache() only at end of training
     """
     from torch.utils.data import DataLoader
+    from torch.nn.utils.rnn import pad_sequence
 
     print(f"\n{'='*70}")
-    print(f"Training Unified Multi-Task Mapper with Prompt Augmentation")
+    print(f"Optimized Training: Unified Multi-Task Mapper")
     print(f"{'='*70}\n")
 
-    # Prepare dataset (use task names for on-the-fly prompt sampling)
+    # Prepare dataset
     dataset = list(zip(
         df['code'].tolist(),
         df['z'].tolist(),
-        df['task'].tolist()  # Store task names, not prompts!
+        df['task'].tolist()
     ))
 
+    # Optimized DataLoader with more workers and prefetching
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=multi_task_collate_fn,
-        num_workers=8,              # Parallel CPU data loading (uses 8 of 16 vCPUs)
-        pin_memory=True,            # Faster CPU→GPU transfer
-        persistent_workers=True     # Keep workers alive between epochs
+        num_workers=12,             # Increased from 8 (using 12 of 16 vCPUs)
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,          # Prefetch more batches
+        drop_last=True              # Consistent batch sizes for torch.compile
     )
 
-    # Initialize RNG for prompt sampling
     rng = np.random.default_rng(seed)
 
-    # Setup scheduler if not provided (for backwards compatibility)
     if scheduler is None:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-7
+            optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7
         )
 
-    # Freeze decoder and get device
+    # Setup models
     mapper_model.train()
     decoder_model.eval()
     for p in decoder_model.parameters():
@@ -464,40 +338,43 @@ def train_unified_mapper(
     if pad_id is None:
         raise ValueError("decoder_tokenizer.pad_token_id must be set.")
 
-    # Training loop
-    print(f"Training Configuration:")
+    print(f"Training Configuration (Optimized):")
     print(f"  Batch size: {batch_size}")
-    print(f"  Epochs: {start_epoch} → {epochs}")
+    print(f"  Effective batch: {batch_size * accumulation_steps}")
+    print(f"  Epochs: {start_epoch} -> {epochs}")
     print(f"  Accumulation steps: {accumulation_steps}")
     print(f"  Learning rate: {optimizer.param_groups[0]['lr']}")
     print(f"  Total programs: {len(dataset)}")
     print(f"  Batches per epoch: {len(dataloader)}")
-    print(f"\nPrompt Augmentation (Strategy 1):")
-    print(f"  Task-specific:   {task_specific_prob*100:.0f}%")
-    print(f"  Problem-class:   {problem_class_prob*100:.0f}%")
-    print(f"  General:         {general_prob*100:.0f}%")
+    print(f"  DataLoader workers: 12")
+    print(f"  Prefetch factor: 4")
+    print(f"\nPrompt Augmentation:")
+    print(f"  Task-specific: {task_specific_prob*100:.0f}%")
+    print(f"  Problem-class: {problem_class_prob*100:.0f}%")
+    print(f"  General: {general_prob*100:.0f}%")
     if start_epoch > 0:
-        print(f"\n⚠ Resuming from epoch {start_epoch}")
+        print(f"\n  Resuming from epoch {start_epoch}")
     print(f"\nStarting training...\n")
 
+    # Training loop
     for epoch in range(start_epoch, epochs):
         total_steps = 0
         optimizer.zero_grad(set_to_none=True)
+        # Accumulate loss on GPU to avoid CPU sync per batch
         running_loss = torch.tensor(0.0, device=first_dev)
 
-        for step, (code_batch, z_batch, task_batch) in enumerate(dataloader):
-            # Move batch to device
-            z_batch = z_batch.to(first_dev)
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+
+        for step, (code_batch, z_batch, task_batch) in enumerate(pbar):
+            z_batch = z_batch.to(first_dev, non_blocking=True)
             B = len(code_batch)
 
-            # Build per-sample prompts with augmentation
             code_texts = [f"```python\n{code}\n```" for code in code_batch]
 
             prompt_id_tensors = []
             target_id_tensors = []
 
             for task_name, code_text in zip(task_batch, code_texts):
-                # Sample augmented prompt on-the-fly (CRITICAL: Prompt Augmentation!)
                 skel_text = sample_prompt_with_augmentation(
                     task_name=task_name,
                     task_specific_prob=task_specific_prob,
@@ -534,41 +411,29 @@ def train_unified_mapper(
                 prompt_id_tensors.append(torch.tensor(prompt_ids, dtype=torch.long))
                 target_id_tensors.append(torch.tensor(target_ids, dtype=torch.long))
 
-            # Pad sequences
-            from torch.nn.utils.rnn import pad_sequence
             prompt_ids = pad_sequence(prompt_id_tensors, batch_first=True, padding_value=pad_id).to(first_dev)
             target_ids = pad_sequence(target_id_tensors, batch_first=True, padding_value=pad_id).to(first_dev)
 
             prompt_embeds = embed_layer(prompt_ids)
-
-            # Mapper generates soft prompts
             soft_prompt_embeds = mapper_model(z_batch).to(first_dev, dtype=embed_dtype)
 
             if soft_prompt_embeds.dim() != 3 or soft_prompt_embeds.size(0) != B:
                 raise ValueError(f"mapper output must be [B, S_soft, D]; got {tuple(soft_prompt_embeds.shape)}")
 
-            # Target embeddings for teacher forcing
             target_embeds = embed_layer(target_ids)
-
-            # Concatenate: [soft_prompts, instruction, target]
             inputs_embeds = torch.cat([soft_prompt_embeds, prompt_embeds, target_embeds], dim=1)
 
-            # Build labels (mask soft prompts and instruction)
             ignore_left = torch.full(
                 (B, prompt_embeds.size(1) + soft_prompt_embeds.size(1)),
-                -100,
-                dtype=torch.long,
-                device=first_dev,
+                -100, dtype=torch.long, device=first_dev,
             )
             tgt_labels = target_ids.masked_fill(target_ids == pad_id, -100)
             labels = torch.cat([ignore_left, tgt_labels], dim=1)
 
-            # Attention mask
             left_mask = torch.ones(B, prompt_embeds.size(1) + soft_prompt_embeds.size(1), dtype=torch.long, device=first_dev)
             right_mask = (target_ids != pad_id).long().to(first_dev)
             att_mask = torch.cat([left_mask, right_mask], dim=1)
 
-            # Forward pass
             out = decoder_model(inputs_embeds=inputs_embeds, attention_mask=att_mask, labels=labels)
             loss = out.loss / accumulation_steps
 
@@ -580,25 +445,25 @@ def train_unified_mapper(
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-        # Final gradient step
+            # Update progress bar with current loss (minimal sync)
+            if step % 10 == 0:
+                pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}'})
+
         if total_steps % accumulation_steps != 0:
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        # Compute average loss (single CPU-GPU sync per epoch)
+        # Single GPU-CPU sync per epoch
         avg_loss = running_loss.item() / max(1, len(dataloader))
-
-        # Step scheduler
         scheduler.step(avg_loss)
 
-        torch.cuda.empty_cache()
-
         if verbose:
-            print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {avg_loss:.4f}")
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | LR: {current_lr:.2e}")
 
         # Save checkpoint every 5 epochs
         if (epoch + 1) % 5 == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f"unified_mapper_epoch{epoch+1}.pth")
+            checkpoint_path = os.path.join(checkpoint_dir, f"unified_mapper_optimized_epoch{epoch+1}.pth")
             checkpoint_data = {
                 'model_state_dict': mapper_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -608,8 +473,9 @@ def train_unified_mapper(
                 checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
             torch.save(checkpoint_data, checkpoint_path)
             if verbose:
-                print(f"  ✓ Checkpoint saved: {checkpoint_path}")
+                print(f"  Checkpoint saved: {checkpoint_path}")
 
+    # Only clear cache at end of training
     torch.cuda.empty_cache()
     return mapper_model
 
@@ -619,15 +485,14 @@ def train_unified_mapper(
 # ============================================================================
 
 def main(resume_checkpoint: Optional[str] = None):
-    """
-    Main training pipeline for unified multi-task mapper.
-
-    Args:
-        resume_checkpoint: Optional path to checkpoint file to resume training from
-    """
+    """Main training pipeline with optimizations."""
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\nUsing device: {device}\n")
+    print(f"\nUsing device: {device}")
+
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB\n")
 
     # ========================================================================
     # Step 1: Load All Augmented Heuristics
@@ -652,13 +517,8 @@ def main(resume_checkpoint: Optional[str] = None):
         model_kwargs={"torch_dtype": torch.float16},
     ).to(device)
 
-    encoder_tokenizer = AutoTokenizer.from_pretrained(
-        "BAAI/bge-code-v1",
-        trust_remote_code=True
-    )
-
     encoder_model.eval()
-    print("✓ Encoder loaded\n")
+    print("Encoder loaded (BAAI/bge-code-v1)\n")
 
     # ========================================================================
     # Step 3: Encode All Heuristics
@@ -667,9 +527,8 @@ def main(resume_checkpoint: Optional[str] = None):
     unified_df = encode_all_heuristics(
         heuristics_list=heuristics_list,
         encoder_model=encoder_model,
-        encoder_tokenizer=encoder_tokenizer,
         device=device,
-        batch_size=32
+        batch_size=64  # Larger batch for encoding
     )
 
     # Free encoder memory
@@ -677,22 +536,23 @@ def main(resume_checkpoint: Optional[str] = None):
     torch.cuda.empty_cache()
 
     # ========================================================================
-    # Step 4: Load Decoder Model (Qwen2.5-Coder)
+    # Step 4: Load Decoder Model (Qwen3-4B with Flash Attention 2)
     # ========================================================================
 
     print(f"{'='*70}")
-    print("Loading Decoder Model")
+    print("Loading Decoder Model (Qwen3-4B-Instruct-2507)")
     print(f"{'='*70}\n")
 
     decoder_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-Coder-7B-Instruct",
+        "Qwen/Qwen3-4B-Instruct-2507",
         torch_dtype=torch.bfloat16,
         device_map="auto",
+        attn_implementation="flash_attention_2",  # 2-3x attention speedup
         trust_remote_code=True
     )
 
     decoder_tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen2.5-Coder-7B-Instruct",
+        "Qwen/Qwen3-4B-Instruct-2507",
         trust_remote_code=True
     )
 
@@ -700,7 +560,7 @@ def main(resume_checkpoint: Optional[str] = None):
         decoder_tokenizer.pad_token = decoder_tokenizer.eos_token
         decoder_tokenizer.pad_token_id = decoder_tokenizer.eos_token_id
 
-    print("✓ Decoder loaded\n")
+    print("Decoder loaded with Flash Attention 2\n")
 
     # ========================================================================
     # Step 5: Initialize Mapper
@@ -721,11 +581,15 @@ def main(resume_checkpoint: Optional[str] = None):
         num_tokens=num_tokens
     )
 
+    # Compile mapper for additional speedup
+    mapper_model = torch.compile(mapper_model, mode="reduce-overhead")
+
     num_params = sum(p.numel() for p in mapper_model.parameters())
     print(f"Mapper Architecture:")
     print(f"  Input: {input_dim}D (code embeddings)")
-    print(f"  Output: {num_tokens} tokens × {output_dim}D (soft prompts)")
-    print(f"  Parameters: {num_params:,}\n")
+    print(f"  Output: {num_tokens} tokens x {output_dim}D (soft prompts)")
+    print(f"  Parameters: {num_params:,}")
+    print(f"  torch.compile: enabled (reduce-overhead mode)\n")
 
     # ========================================================================
     # Step 6: Setup Optimizer and Scheduler
@@ -735,11 +599,7 @@ def main(resume_checkpoint: Optional[str] = None):
     optimizer = torch.optim.AdamW(mapper_model.parameters(), lr=learning_rate)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-7
+        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7
     )
 
     # ========================================================================
@@ -748,7 +608,7 @@ def main(resume_checkpoint: Optional[str] = None):
 
     start_epoch = 0
     if resume_checkpoint is not None:
-        start_epoch, checkpoint_metadata = load_checkpoint_for_resume(
+        start_epoch, _ = load_checkpoint_for_resume(
             checkpoint_path=resume_checkpoint,
             mapper_model=mapper_model,
             optimizer=optimizer,
@@ -763,18 +623,18 @@ def main(resume_checkpoint: Optional[str] = None):
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     # ========================================================================
-    # Step 9: Train Unified Mapper
+    # Step 9: Train Unified Mapper (Optimized)
     # ========================================================================
 
-    trained_mapper = train_unified_mapper(
+    trained_mapper = train_unified_mapper_optimized(
         df=unified_df,
         mapper_model=mapper_model,
         optimizer=optimizer,
         decoder_model=decoder_model,
         decoder_tokenizer=decoder_tokenizer,
-        batch_size=4,
+        batch_size=16,              # Increased from 4
         epochs=30,
-        accumulation_steps=2,
+        accumulation_steps=1,       # No accumulation needed with larger batch
         max_length=2048,
         verbose=True,
         checkpoint_dir=checkpoint_dir,
@@ -783,7 +643,7 @@ def main(resume_checkpoint: Optional[str] = None):
     )
 
     # ========================================================================
-    # Step 10: Save Final Checkpoint with Metadata
+    # Step 10: Save Final Checkpoint
     # ========================================================================
 
     print(f"\n{'='*70}")
@@ -803,6 +663,14 @@ def main(resume_checkpoint: Optional[str] = None):
         'total_programs': len(unified_df),
         'programs_per_task': task_counts,
         'epoch': 30,
+        'decoder_model': 'Qwen/Qwen3-4B-Instruct-2507',
+        'optimizations': {
+            'flash_attention_2': True,
+            'torch_compile': True,
+            'batch_size': 16,
+            'num_workers': 12,
+            'prefetch_factor': 4,
+        },
         'prompt_augmentation': {
             'strategy': 'Strategy 1: Task-Specific + Problem-Class + General',
             'task_specific_prob': 0.60,
@@ -811,32 +679,32 @@ def main(resume_checkpoint: Optional[str] = None):
         }
     }
 
-    final_path = os.path.join(checkpoint_dir, "unified_mapper.pth")
+    final_path = os.path.join(checkpoint_dir, "unified_mapper_optimized.pth")
     torch.save(checkpoint_data, final_path)
 
-    print(f"✓ Final model saved to: {final_path}")
+    print(f"Final model saved to: {final_path}")
     print(f"\nTraining Complete!")
     print(f"{'='*70}\n")
 
-    # Print summary
     print("Training Summary:")
     print(f"  Total programs: {len(unified_df)}")
     print(f"  Tasks trained: {len(set(unified_df['task']))}")
     print(f"  Model parameters: {num_params:,}")
-    print(f"  Prompt augmentation: 60% task-specific, 20% problem-class, 20% general")
+    print(f"  Decoder: Qwen3-4B-Instruct-2507")
+    print(f"  Optimizations: Flash Attention 2, torch.compile, batch=16")
     print(f"  Checkpoint: {final_path}")
     print()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train unified multi-task mapper with optional resume support"
+        description="Optimized unified multi-task mapper training"
     )
     parser.add_argument(
         "--resume",
         type=str,
         default=None,
-        help="Path to checkpoint file to resume training from (e.g., Mapper_Checkpoints/unified_mapper.pth)"
+        help="Path to checkpoint file to resume training from"
     )
     args = parser.parse_args()
 
