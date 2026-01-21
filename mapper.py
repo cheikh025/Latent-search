@@ -71,7 +71,6 @@ def train_mapper(df, mapper_model, optimizer, decoder_model, decoder_tokenizer, 
         mode='min',           # Minimize loss
         factor=0.5,           # Reduce LR by half
         patience=5,           # Wait 5 epochs before reducing
-        verbose=verbose,      # Print LR changes
         min_lr=1e-7          # Don't go below this
     )
 

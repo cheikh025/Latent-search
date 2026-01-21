@@ -355,7 +355,6 @@ def train_unified_mapper(
         mode='min',
         factor=0.5,
         patience=5,
-        verbose=verbose,
         min_lr=1e-7
     )
 

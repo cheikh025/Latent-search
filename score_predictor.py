@@ -125,7 +125,7 @@ def train_score_predictor(
 
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, verbose=verbose
+        optimizer, mode='min', factor=0.5, patience=10
     )
 
     # Loss function (MSE)
