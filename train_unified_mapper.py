@@ -343,7 +343,10 @@ def train_unified_mapper(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=multi_task_collate_fn
+        collate_fn=multi_task_collate_fn,
+        num_workers=8,              # Parallel CPU data loading (uses 8 of 16 vCPUs)
+        pin_memory=True,            # Faster CPU→GPU transfer
+        persistent_workers=True     # Keep workers alive between epochs
     )
 
     # Initialize RNG for prompt sampling
