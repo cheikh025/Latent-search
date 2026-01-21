@@ -2,8 +2,9 @@
 Optimized Unified Multi-Task Mapper Training
 
 Optimizations for RTX 6000 Pro (96GB VRAM):
-- Larger batch size (16) with no gradient accumulation
+- Batch size 8 with gradient accumulation (effective batch 16)
 - Flash Attention 2 for 2-3x attention speedup
+- Gradient checkpointing to reduce memory usage
 - torch.compile() for 10-30% overall speedup
 - Increased DataLoader parallelism (12 workers, prefetch_factor=4)
 - Reduced GPU-CPU synchronization
@@ -15,6 +16,9 @@ Usage:
 """
 
 import os
+
+# Set CUDA memory allocator to reduce fragmentation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import json
 import glob
 import warnings
@@ -492,7 +496,10 @@ def main(resume_checkpoint: Optional[str] = None):
 
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB\n")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        # Enable TF32 for faster matmul on Ampere+ GPUs
+        torch.set_float32_matmul_precision('high')
+        print("TF32 matmul precision: enabled\n")
 
     # ========================================================================
     # Step 1: Load All Augmented Heuristics
@@ -514,7 +521,7 @@ def main(resume_checkpoint: Optional[str] = None):
     encoder_model = SentenceTransformer(
         "BAAI/bge-code-v1",
         trust_remote_code=True,
-        model_kwargs={"torch_dtype": torch.float16},
+        model_kwargs={"dtype": torch.float16},
     ).to(device)
 
     encoder_model.eval()
@@ -551,6 +558,9 @@ def main(resume_checkpoint: Optional[str] = None):
         trust_remote_code=True
     )
 
+    # Enable gradient checkpointing to reduce memory (recompute activations during backward)
+    decoder_model.gradient_checkpointing_enable()
+
     decoder_tokenizer = AutoTokenizer.from_pretrained(
         "Qwen/Qwen3-4B-Instruct-2507",
         trust_remote_code=True
@@ -560,7 +570,7 @@ def main(resume_checkpoint: Optional[str] = None):
         decoder_tokenizer.pad_token = decoder_tokenizer.eos_token
         decoder_tokenizer.pad_token_id = decoder_tokenizer.eos_token_id
 
-    print("Decoder loaded with Flash Attention 2\n")
+    print("Decoder loaded with Flash Attention 2 + Gradient Checkpointing\n")
 
     # ========================================================================
     # Step 5: Initialize Mapper
@@ -632,10 +642,10 @@ def main(resume_checkpoint: Optional[str] = None):
         optimizer=optimizer,
         decoder_model=decoder_model,
         decoder_tokenizer=decoder_tokenizer,
-        batch_size=16,              # Increased from 4
+        batch_size=8,               # Reduced to avoid OOM on logits tensor
         epochs=30,
-        accumulation_steps=1,       # No accumulation needed with larger batch
-        max_length=2048,
+        accumulation_steps=2,       # Effective batch = 16
+        max_length=2048,            # Reduced to save memory
         verbose=True,
         checkpoint_dir=checkpoint_dir,
         start_epoch=start_epoch,
@@ -666,8 +676,12 @@ def main(resume_checkpoint: Optional[str] = None):
         'decoder_model': 'Qwen/Qwen3-4B-Instruct-2507',
         'optimizations': {
             'flash_attention_2': True,
+            'gradient_checkpointing': True,
             'torch_compile': True,
-            'batch_size': 16,
+            'batch_size': 8,
+            'accumulation_steps': 2,
+            'effective_batch_size': 16,
+            'max_length': 2048,
             'num_workers': 12,
             'prefetch_factor': 4,
         },
@@ -691,7 +705,8 @@ def main(resume_checkpoint: Optional[str] = None):
     print(f"  Tasks trained: {len(set(unified_df['task']))}")
     print(f"  Model parameters: {num_params:,}")
     print(f"  Decoder: Qwen3-4B-Instruct-2507")
-    print(f"  Optimizations: Flash Attention 2, torch.compile, batch=16")
+    print(f"  Optimizations: Flash Attention 2, Gradient Checkpointing, torch.compile")
+    print(f"  Batch: 8 x 2 accumulation = 16 effective")
     print(f"  Checkpoint: {final_path}")
     print()
 
