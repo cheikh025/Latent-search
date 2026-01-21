@@ -391,7 +391,7 @@ def train_unified_mapper(
     for epoch in range(epochs):
         total_steps = 0
         optimizer.zero_grad(set_to_none=True)
-        running_loss = 0.0
+        running_loss = torch.tensor(0.0, device=first_dev)
 
         for step, (code_batch, z_batch, task_batch) in enumerate(dataloader):
             # Move batch to device
@@ -481,7 +481,7 @@ def train_unified_mapper(
             loss = out.loss / accumulation_steps
 
             loss.backward()
-            running_loss += loss.item()
+            running_loss += loss.detach()
             total_steps += 1
 
             if total_steps % accumulation_steps == 0:
@@ -493,8 +493,8 @@ def train_unified_mapper(
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        # Compute average loss
-        avg_loss = running_loss / max(1, len(dataloader))
+        # Compute average loss (single CPU-GPU sync per epoch)
+        avg_loss = running_loss.item() / max(1, len(dataloader))
 
         # Step scheduler
         scheduler.step(avg_loss)
