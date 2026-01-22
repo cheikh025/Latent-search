@@ -7,7 +7,9 @@ Simpler pipeline than u-space version - no normalizing flow required:
 3. Generate code using mapper + decoder
 4. Evaluate and save successful programs
 
-Encoder: BAAI/bge-code-v1 (same as mapper training)
+Uses same models as train_unified_mapper_optimized.py:
+- Encoder: BAAI/bge-code-v1
+- Decoder: Qwen/Qwen3-4B-Instruct-2507 (with Flash Attention 2)
 """
 
 import os
@@ -55,14 +57,15 @@ TASK_PROMPTS = {
 # Model Loading
 # ============================================================================
 
-def load_decoder(model_name: str = "Qwen/Qwen2.5-Coder-7B-Instruct", device: str = "cuda"):
-    """Load decoder model and tokenizer."""
+def load_decoder(model_name: str = "Qwen/Qwen3-4B-Instruct-2507", device: str = "cuda"):
+    """Load decoder model and tokenizer (same as train_unified_mapper_optimized.py)."""
     print(f"Loading decoder: {model_name}...")
 
     decoder_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,  # Same as optimized training
         device_map="auto",
+        attn_implementation="flash_attention_2",  # 2-3x attention speedup
         trust_remote_code=True
     )
 
@@ -75,7 +78,7 @@ def load_decoder(model_name: str = "Qwen/Qwen2.5-Coder-7B-Instruct", device: str
         decoder_tokenizer.pad_token = decoder_tokenizer.eos_token
         decoder_tokenizer.pad_token_id = decoder_tokenizer.eos_token_id
 
-    print(f"  Decoder loaded.")
+    print(f"  Decoder loaded with Flash Attention 2.")
     return decoder_model, decoder_tokenizer
 
 
@@ -346,7 +349,7 @@ def gradient_search_pipeline(
     gradient_steps: int = 100,
     lr: float = 0.01,
     temperature: float = 0.7,
-    decoder_name: str = "Qwen/Qwen2.5-Coder-7B-Instruct",
+    decoder_name: str = "Qwen/Qwen3-4B-Instruct-2507",
     device: str = "cuda",
     output_dir: str = "gradient_search_results",
     verbose: bool = True
@@ -638,7 +641,7 @@ def main():
     parser.add_argument('--task', type=str, default='tsp_construct', help='Task name')
     parser.add_argument('--predictor', type=str, default='ranking_predictor_z.pth', help='Path to ranking predictor')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
-    parser.add_argument('--decoder', type=str, default='Qwen/Qwen2.5-Coder-7B-Instruct', help='Decoder model')
+    parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='Decoder model')
     parser.add_argument('--num_iterations', type=int, default=5, help='Number of search iterations')
     parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration')
     parser.add_argument('--gradient_steps', type=int, default=100, help='Gradient steps per search')
