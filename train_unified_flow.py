@@ -253,6 +253,7 @@ def train_unified_flow(
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     batch_size: int = 128,
     epochs: int = 200,
+    holdout_ratio: float = 0.1,
     device: str = 'cuda',
     verbose: bool = True,
     checkpoint_dir: str = "Flow_Checkpoints",
@@ -269,20 +270,52 @@ def train_unified_flow(
     print(f"Training: Unified Multi-Task Normalizing Flow")
     print(f"{'='*70}\n")
 
-    # Prepare data
+    # Prepare data with train/val split
     z_tensor = torch.tensor(z_combined, dtype=torch.float32)
-    dataset = TensorDataset(z_tensor)
 
-    # Optimized DataLoader
-    dataloader = DataLoader(
-        dataset,
+    # Split into train and validation sets
+    n_total = len(z_tensor)
+    n_val = int(n_total * holdout_ratio)
+    n_train = n_total - n_val
+
+    # Shuffle indices for random split
+    indices = torch.randperm(n_total)
+    train_indices = indices[:n_train]
+    val_indices = indices[n_train:]
+
+    z_train = z_tensor[train_indices]
+    z_val = z_tensor[val_indices]
+
+    print(f"Data Split:")
+    print(f"  Total samples: {n_total}")
+    print(f"  Training: {n_train} ({(1-holdout_ratio)*100:.1f}%)")
+    print(f"  Validation: {n_val} ({holdout_ratio*100:.1f}%)")
+    print()
+
+    # Training DataLoader
+    train_dataset = TensorDataset(z_train)
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=8,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
-        drop_last=True  # Consistent batch sizes
+        drop_last=True
+    )
+
+    # Validation DataLoader
+    val_dataset = TensorDataset(z_val)
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
+        drop_last=False
     )
 
     # Move model to device
@@ -293,10 +326,10 @@ def train_unified_flow(
     print(f"  Batch size: {batch_size}")
     print(f"  Epochs: {start_epoch} → {epochs}")
     print(f"  Learning rate: {optimizer.param_groups[0]['lr']}")
-    print(f"  Total programs: {len(z_combined)}")
-    print(f"  Batches per epoch: {len(dataloader)}")
+    print(f"  Total programs: {n_total} (train: {n_train}, val: {n_val})")
+    print(f"  Batches per epoch: {len(train_dataloader)} (train), {len(val_dataloader)} (val)")
     print(f"  Device: {device}")
-    print(f"  DataLoader workers: 8")
+    print(f"  DataLoader workers: 8 (train), 4 (val)")
 
     if start_epoch > 0:
         print(f"\n  Resuming from epoch {start_epoch}")
@@ -308,16 +341,18 @@ def train_unified_flow(
     print(f"\nStarting training...\n")
 
     # Training loop
-    best_loss = float('inf')
+    best_val_loss = float('inf')
 
     for epoch in range(start_epoch, epochs):
-        epoch_loss = 0.0
-        num_batches = 0
+        # ===== Training Phase =====
+        flow_model.train()
+        train_loss = 0.0
+        num_train_batches = 0
 
         # Accumulate loss on GPU to avoid CPU sync per batch
-        running_loss = torch.tensor(0.0, device=device)
+        running_train_loss = torch.tensor(0.0, device=device)
 
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False)
 
         for (z_batch,) in pbar:
             z_batch = z_batch.to(device, non_blocking=True)
@@ -337,39 +372,82 @@ def train_unified_flow(
             # Update parameters
             optimizer.step()
 
-            running_loss += loss.detach()
-            num_batches += 1
+            running_train_loss += loss.detach()
+            num_train_batches += 1
 
             # Update progress bar
-            if num_batches % 10 == 0:
+            if num_train_batches % 10 == 0:
                 pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
-        # Single GPU-CPU sync per epoch
-        avg_loss = running_loss.item() / max(num_batches, 1)
-        scheduler.step(avg_loss)
+        avg_train_loss = running_train_loss.item() / max(num_train_batches, 1)
 
-        # Track best loss
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        # ===== Validation Phase =====
+        flow_model.eval()
+        running_val_loss = torch.tensor(0.0, device=device)
+        num_val_batches = 0
+
+        with torch.no_grad():
+            for (z_batch,) in val_dataloader:
+                z_batch = z_batch.to(device, non_blocking=True)
+                loss = compute_flow_loss(flow_model, z_batch)
+                running_val_loss += loss.detach()
+                num_val_batches += 1
+
+        avg_val_loss = running_val_loss.item() / max(num_val_batches, 1)
+
+        # Update scheduler based on validation loss
+        scheduler.step(avg_val_loss)
+
+        # Track best validation loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
 
         if verbose:
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | Best: {best_loss:.4f} | LR: {current_lr:.2e}")
+            print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Best Val: {best_val_loss:.4f} | LR: {current_lr:.2e}")
 
         # Save checkpoint periodically
         if (epoch + 1) % save_every == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f"unified_flow_epoch{epoch+1}.pth")
+            checkpoint_metadata = metadata.copy() if metadata else {}
+            checkpoint_metadata.update({
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'best_val_loss': best_val_loss
+            })
             save_checkpoint(
                 epoch=epoch + 1,
                 flow_model=flow_model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                loss=avg_loss,
+                loss=avg_val_loss,  # Save validation loss
                 checkpoint_path=checkpoint_path,
-                metadata=metadata
+                metadata=checkpoint_metadata
             )
             if verbose:
                 print(f"  ✓ Checkpoint saved: {checkpoint_path}")
+
+        # Save best model separately
+        if avg_val_loss == best_val_loss:
+            best_checkpoint_path = os.path.join(checkpoint_dir, "unified_flow_best.pth")
+            checkpoint_metadata = metadata.copy() if metadata else {}
+            checkpoint_metadata.update({
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'best_val_loss': best_val_loss,
+                'is_best': True
+            })
+            save_checkpoint(
+                epoch=epoch + 1,
+                flow_model=flow_model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                loss=avg_val_loss,
+                checkpoint_path=best_checkpoint_path,
+                metadata=checkpoint_metadata
+            )
+            if verbose:
+                print(f"  ✓ Best model saved: {best_checkpoint_path}")
 
     # Clear cache at end of training
     if device == 'cuda':
@@ -377,7 +455,7 @@ def train_unified_flow(
 
     print(f"\n{'='*70}")
     print(f"Training Complete!")
-    print(f"  Best Loss: {best_loss:.4f}")
+    print(f"  Best Validation Loss: {best_val_loss:.4f}")
     print(f"{'='*70}\n")
 
     return flow_model
@@ -446,7 +524,7 @@ def validate_flow(flow_model: NormalizingFlow, z_combined: np.ndarray, device: s
 # Main Training Script
 # ============================================================================
 
-def main(resume_checkpoint: Optional[str] = None):
+def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
     """Main training pipeline for unified normalizing flow."""
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -596,6 +674,7 @@ def main(resume_checkpoint: Optional[str] = None):
         scheduler=scheduler,
         batch_size=128,           # Flow is lighter, can use larger batches
         epochs=200,
+        holdout_ratio=holdout_ratio,
         device=device,
         verbose=True,
         checkpoint_dir=checkpoint_dir,
@@ -639,6 +718,7 @@ def main(resume_checkpoint: Optional[str] = None):
             'scheduler': 'ReduceLROnPlateau',
             'batch_size': 128,
             'epochs': 200,
+            'holdout_ratio': holdout_ratio,
             'gradient_clipping': 5.0,
         }
     }
@@ -651,11 +731,14 @@ def main(resume_checkpoint: Optional[str] = None):
     print(f"Training Summary")
     print(f"{'='*70}")
     print(f"  Total programs: {len(z_combined):,}")
+    print(f"  Training split: {int((1-holdout_ratio)*len(z_combined))} train, {int(holdout_ratio*len(z_combined))} val")
     print(f"  Tasks trained: {len(task_counts)}")
     print(f"  Model parameters: {num_params:,}")
     print(f"  Architecture: RealNVP with ActNorm")
     print(f"  Layers: {num_layers}")
+    print(f"  Holdout ratio: {holdout_ratio}")
     print(f"  Final checkpoint: {final_path}")
+    print(f"  Best checkpoint: {os.path.join(checkpoint_dir, 'unified_flow_best.pth')}")
     print(f"{'='*70}\n")
 
     print("✓ Unified normalizing flow training complete!")
@@ -676,6 +759,12 @@ if __name__ == "__main__":
         default=None,
         help="Path to checkpoint file to resume training from"
     )
+    parser.add_argument(
+        "--holdout_ratio",
+        type=float,
+        default=0.1,
+        help="Fraction of data to hold out for validation (default: 0.1)"
+    )
     args = parser.parse_args()
 
-    main(resume_checkpoint=args.resume)
+    main(resume_checkpoint=args.resume, holdout_ratio=args.holdout_ratio)
