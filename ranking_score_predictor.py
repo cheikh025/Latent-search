@@ -1,8 +1,11 @@
 """
-Ranking-based score predictor for gradient-based optimization in prior space.
+Ranking-based score predictor for gradient-based optimization in prior space (u-space).
 
 Uses pairwise ranking loss instead of MSE regression to handle small datasets.
 From n programs, creates n*(n-1)/2 pairs for training.
+
+Encoder: BAAI/bge-code-v1 (same as unified mapper training)
+Pipeline: code -> z (encoder) -> u (flow) -> score (predictor)
 """
 
 import json
@@ -38,10 +41,12 @@ class RankingScorePredictor(nn.Module):
     MLP that predicts score from prior-space vector u.
     Trained with ranking loss for better generalization on small datasets.
 
+    Uses BAAI/bge-code-v1 for z embeddings, then normalizing flow for z -> u.
+
     R: R^d -> R
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int = 256, num_layers: int = 2, dropout: float = 0.1):
+    def __init__(self, input_dim: int = 1024, hidden_dim: int = 256, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
 
         self.input_dim = input_dim
@@ -123,16 +128,55 @@ def evaluate_programs(task_name: str, programs: Dict[str, str], use_secure: bool
     return pd.DataFrame(results)
 
 
-def encode_programs(codes: List[str], device: str = 'cuda') -> torch.Tensor:
-    """Encode programs using CodeBERT/SentenceTransformer."""
-    from utils import get_code_embedding
+def get_encoder_model(device: str = 'cuda'):
+    """
+    Load the same encoder model used in unified training and programDB.
+    Uses BAAI/bge-code-v1 SentenceTransformer.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    encoder_model = SentenceTransformer(
+        "BAAI/bge-code-v1",
+        trust_remote_code=True,
+        model_kwargs={"torch_dtype": torch.float16},
+    ).to(device)
+
+    encoder_model.eval()
+    return encoder_model
+
+
+def encode_programs(codes: List[str], encoder_model=None, device: str = 'cuda', batch_size: int = 32) -> torch.Tensor:
+    """
+    Encode programs using BAAI/bge-code-v1 SentenceTransformer.
+    Same encoding as used in unified mapper training and programDB.
+
+    Args:
+        codes: List of code strings
+        encoder_model: Optional pre-loaded encoder (to avoid reloading)
+        device: Device for encoding
+        batch_size: Batch size for encoding
+
+    Returns:
+        Tensor of embeddings [n, 1024]
+    """
+    # Load encoder if not provided
+    if encoder_model is None:
+        encoder_model = get_encoder_model(device)
 
     embeddings = []
-    for code in tqdm(codes, desc="Encoding programs"):
-        emb = get_code_embedding(code)
-        embeddings.append(emb)
 
-    return torch.tensor(np.stack(embeddings), dtype=torch.float32, device=device)
+    with torch.no_grad():
+        for i in tqdm(range(0, len(codes), batch_size), desc="Encoding programs"):
+            batch_codes = codes[i:i+batch_size]
+            batch_embeddings = encoder_model.encode(
+                batch_codes,
+                convert_to_tensor=True,
+                device=device,
+                show_progress_bar=False
+            )
+            embeddings.append(batch_embeddings.cpu().numpy())
+
+    return torch.tensor(np.vstack(embeddings), dtype=torch.float32, device=device)
 
 
 def create_pairwise_data(
@@ -196,7 +240,8 @@ def create_dataset_from_task(
     flow_model,
     min_score_diff: float = 0.0,
     device: str = 'cuda',
-    cache_dir: Optional[str] = None
+    cache_dir: Optional[str] = None,
+    encoder_model=None
 ) -> Tuple[PairwiseDataset, pd.DataFrame]:
     """
     Create pairwise dataset from a task's heuristics.
@@ -207,6 +252,7 @@ def create_dataset_from_task(
         min_score_diff: Minimum score difference for pairs
         device: Device to use
         cache_dir: Optional directory to cache evaluated results
+        encoder_model: Optional pre-loaded encoder model
 
     Returns:
         dataset: PairwiseDataset for training
@@ -237,7 +283,7 @@ def create_dataset_from_task(
 
     # Encode programs
     codes = df['code'].tolist()
-    embeddings = encode_programs(codes, device=device)
+    embeddings = encode_programs(codes, encoder_model=encoder_model, device=device)
 
     # Store embeddings in dataframe
     df['z'] = list(embeddings.cpu().numpy())
@@ -473,6 +519,8 @@ def save_ranking_predictor(
         'input_dim': predictor.input_dim,
         'hidden_dim': predictor.hidden_dim,
         'num_layers': predictor.num_layers,
+        'space': 'u',  # Indicates this model operates on u-space (prior space)
+        'encoder': 'BAAI/bge-code-v1',  # Encoder used for z embeddings
     }
 
     if history is not None:
@@ -498,6 +546,9 @@ def load_ranking_predictor(path: str, device: str = 'cuda') -> Tuple[RankingScor
     predictor.to(device)
 
     print(f"Loaded ranking predictor from {path}")
+    print(f"  Space: {checkpoint.get('space', 'u')}")
+    print(f"  Encoder: {checkpoint.get('encoder', 'BAAI/bge-code-v1')}")
+    print(f"  Input dim: {checkpoint['input_dim']}")
 
     return predictor, checkpoint
 
@@ -528,13 +579,18 @@ def main():
     args = parser.parse_args()
 
     print("="*70)
-    print("Ranking Score Predictor Training")
+    print("Ranking Score Predictor Training (U-Space)")
     print("="*70)
     print(f"Task: {args.task}")
     print(f"Flow model: {args.flow_path}")
     print(f"Loss type: {args.loss_type}")
     print(f"Device: {args.device}")
     print()
+
+    # Load encoder model (BAAI/bge-code-v1)
+    print("Loading encoder model (BAAI/bge-code-v1)...")
+    encoder_model = get_encoder_model(args.device)
+    print("Encoder loaded.\n")
 
     # Load flow model
     from normalizing_flow import NormalizingFlow
@@ -556,12 +612,17 @@ def main():
         flow_model=flow_model,
         min_score_diff=args.min_score_diff,
         device=args.device,
-        cache_dir=args.cache_dir
+        cache_dir=args.cache_dir,
+        encoder_model=encoder_model
     )
+
+    # Free encoder memory after encoding
+    del encoder_model
+    torch.cuda.empty_cache()
 
     print(f"\nDataset size: {len(dataset)} pairs")
 
-    # Create predictor
+    # Create predictor - input_dim comes from flow (u-space has same dim as z-space)
     input_dim = flow_checkpoint['dim']
     predictor = RankingScorePredictor(
         input_dim=input_dim,
