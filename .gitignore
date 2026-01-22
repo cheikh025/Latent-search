@@ -2,3 +2,4 @@
 *.pdf
 *.md
 .env
+*.ipynb
