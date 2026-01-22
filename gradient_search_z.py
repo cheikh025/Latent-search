@@ -133,21 +133,17 @@ def gradient_ascent_z(
     init_z: torch.Tensor,
     steps: int = 100,
     lr: float = 0.01,
-    momentum: float = 0.9,
-    noise_scale: float = 0.0,
     device: str = 'cuda',
     verbose: bool = False
 ) -> torch.Tensor:
     """
-    Perform gradient ascent in z-space to maximize predicted ranking score.
+    Simple gradient ascent in z-space to maximize predicted ranking score.
 
     Args:
         predictor: Trained ranking score predictor R(z)
         init_z: Initial z vectors [num_starts, dim]
         steps: Number of gradient ascent steps
         lr: Learning rate
-        momentum: Momentum coefficient (0 = no momentum)
-        noise_scale: Scale of noise to add for exploration (0 = no noise)
         device: Device to use
         verbose: Print progress
 
@@ -158,9 +154,6 @@ def gradient_ascent_z(
 
     z = init_z.clone().to(device).requires_grad_(True)
     num_samples = z.shape[0]
-
-    # Momentum buffer
-    velocity = torch.zeros_like(z) if momentum > 0 else None
 
     if verbose:
         print(f"Gradient ascent: {num_samples} starts, {steps} steps, lr={lr}")
@@ -176,16 +169,9 @@ def gradient_ascent_z(
         loss = -scores.mean()
         loss.backward()
 
+        # Simple gradient ascent update
         with torch.no_grad():
-            if momentum > 0:
-                velocity = momentum * velocity + z.grad
-                z += lr * velocity
-            else:
-                z += lr * z.grad
-
-            # Add noise for exploration
-            if noise_scale > 0:
-                z += noise_scale * torch.randn_like(z)
+            z += lr * z.grad
 
         if verbose and (step + 1) % 20 == 0:
             avg_score = -loss.item()
@@ -386,9 +372,10 @@ def gradient_search_pipeline(
     embed_layer = decoder_model.get_input_embeddings()
     mapper_model = mapper_model.to(embed_layer.weight.device)
 
-    # Load encoder (for encoding existing heuristics)
+    # Load encoder ONCE (for encoding existing heuristics and new programs)
     print("Loading encoder (BAAI/bge-code-v1)...")
     encoder_model = get_encoder_model(device)
+    encoder_model.eval()  # Set to eval mode
 
     # Load evaluator
     print(f"Loading evaluator for {task_name}...")
@@ -435,9 +422,7 @@ def gradient_search_pipeline(
     print(f"  Top predicted score: {init_scores.max().item():.4f}")
     print(f"  Bottom predicted score: {init_scores.min().item():.4f}")
 
-    # Free encoder memory
-    del encoder_model
-    torch.cuda.empty_cache()
+    # Keep encoder loaded for re-encoding new programs
 
     # ===== Run Search =====
 
@@ -560,9 +545,8 @@ def gradient_search_pipeline(
 
         # Update init_embeddings with successful programs for next iteration
         if successful > 0:
-            # Re-encode successful programs
+            # Re-encode successful programs (using already-loaded encoder)
             new_codes = [r['code'] for r in all_results[-successful:]]
-            encoder_model = get_encoder_model(device)
             with torch.no_grad():
                 new_embeddings = encoder_model.encode(
                     new_codes,
@@ -570,8 +554,6 @@ def gradient_search_pipeline(
                     device=device,
                     show_progress_bar=False
                 ).float()  # Convert to float32
-            del encoder_model
-            torch.cuda.empty_cache()
 
             # Combine with existing
             if init_embeddings is not None:
@@ -618,6 +600,10 @@ def gradient_search_pipeline(
     with open(results_path, 'w') as f:
         json.dump(all_results, f, indent=2)
     print(f"Saved detailed results to {results_path}")
+
+    # Clean up encoder
+    del encoder_model
+    torch.cuda.empty_cache()
 
     return all_results, successful_programs
 
