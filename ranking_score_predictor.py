@@ -240,7 +240,6 @@ def create_dataset_from_task(
     flow_model,
     min_score_diff: float = 0.0,
     device: str = 'cuda',
-    cache_dir: Optional[str] = None,
     encoder_model=None
 ) -> Tuple[PairwiseDataset, pd.DataFrame]:
     """
@@ -251,32 +250,18 @@ def create_dataset_from_task(
         flow_model: Trained normalizing flow
         min_score_diff: Minimum score difference for pairs
         device: Device to use
-        cache_dir: Optional directory to cache evaluated results
         encoder_model: Optional pre-loaded encoder model
 
     Returns:
         dataset: PairwiseDataset for training
         df: DataFrame with evaluated programs
     """
-    cache_path = Path(cache_dir) / f"{task_name}_evaluated.parquet" if cache_dir else None
+    # Load and evaluate
+    programs = load_heuristics(task_name)
+    print(f"Loaded {len(programs)} programs from {task_name}")
 
-    # Try to load from cache
-    if cache_path and cache_path.exists():
-        print(f"Loading cached evaluation from {cache_path}")
-        df = pd.read_parquet(cache_path)
-    else:
-        # Load and evaluate
-        programs = load_heuristics(task_name)
-        print(f"Loaded {len(programs)} programs from {task_name}")
-
-        df = evaluate_programs(task_name, programs)
-        print(f"Successfully evaluated {len(df)} programs")
-
-        # Cache results
-        if cache_path:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(cache_path)
-            print(f"Cached to {cache_path}")
+    df = evaluate_programs(task_name, programs)
+    print(f"Successfully evaluated {len(df)} programs")
 
     if len(df) < 2:
         raise ValueError(f"Need at least 2 programs, got {len(df)}")
@@ -552,7 +537,6 @@ def main():
     parser.add_argument('--tau', type=float, default=1.0, help='Temperature for soft ranking loss (higher = sharper gradients)')
     parser.add_argument('--min_score_diff', type=float, default=0.0, help='Min score diff for pairs')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
-    parser.add_argument('--cache_dir', type=str, default='cache', help='Cache directory')
 
     args = parser.parse_args()
 
@@ -590,7 +574,6 @@ def main():
         flow_model=flow_model,
         min_score_diff=args.min_score_diff,
         device=args.device,
-        cache_dir=args.cache_dir,
         encoder_model=encoder_model
     )
 
