@@ -400,36 +400,38 @@ def gradient_search_pipeline(
     if skeleton_prompt is None:
         raise ValueError(f"No prompt defined for task: {task_name}")
 
-    # ===== Load Initial Data for Warm Start =====
+    # ===== Load Initial Data (Required for Search) =====
 
-    print(f"\nLoading existing heuristics for warm start...")
-    try:
-        heuristics = load_heuristics(task_name)
-        codes = list(heuristics.values())
+    print(f"\nLoading heuristics from task/{task_name}/heuristics.json...")
+    heuristics = load_heuristics(task_name)
+    codes = list(heuristics.values())
 
-        # Encode existing heuristics
-        with torch.no_grad():
-            init_embeddings = encoder_model.encode(
-                codes,
-                convert_to_tensor=True,
-                device=device,
-                show_progress_bar=True
-            )
+    if len(codes) == 0:
+        raise ValueError(f"No heuristics found in task/{task_name}/heuristics.json")
 
-        # Score existing heuristics with predictor
-        with torch.no_grad():
-            init_scores = predictor(init_embeddings).squeeze()
+    print(f"  Loaded {len(codes)} heuristics")
 
-        # Sort by predicted score
-        sorted_indices = torch.argsort(init_scores, descending=True)
-        init_embeddings = init_embeddings[sorted_indices]
+    # Encode existing heuristics
+    print("Encoding heuristics...")
+    with torch.no_grad():
+        init_embeddings = encoder_model.encode(
+            codes,
+            convert_to_tensor=True,
+            device=device,
+            show_progress_bar=True
+        )
 
-        print(f"  Loaded {len(codes)} heuristics")
-        print(f"  Top predicted score: {init_scores.max().item():.4f}")
+    # Score existing heuristics with predictor
+    print("Scoring with predictor...")
+    with torch.no_grad():
+        init_scores = predictor(init_embeddings).squeeze()
 
-    except Exception as e:
-        print(f"  Could not load heuristics: {e}")
-        init_embeddings = None
+    # Sort by predicted score (descending - best first)
+    sorted_indices = torch.argsort(init_scores, descending=True)
+    init_embeddings = init_embeddings[sorted_indices]
+
+    print(f"  Top predicted score: {init_scores.max().item():.4f}")
+    print(f"  Bottom predicted score: {init_scores.min().item():.4f}")
 
     # Free encoder memory
     del encoder_model
