@@ -100,6 +100,11 @@ def load_mapper(mapper_path: str, decoder_model, device: str = "cuda"):
         output_dim = None
         num_tokens = None
 
+    # Handle torch.compile() prefix: remove '_orig_mod.' from keys
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        print("  Detected torch.compile() checkpoint, removing '_orig_mod.' prefix...")
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+
     # Infer dimensions if not in checkpoint
     if input_dim is None or output_dim is None or num_tokens is None:
         print("  Inferring dimensions from weights...")
