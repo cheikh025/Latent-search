@@ -591,8 +591,8 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1, dr
     print(f"{'='*70}\n")
 
     embedding_dim = z_combined.shape[1]
-    num_layers = 8
-    hidden_dim = 512
+    num_layers = 4  # Reduced from 8 for small datasets
+    hidden_dim = 128  # Reduced from 512 for small datasets
 
     flow_model = NormalizingFlow(
         dim=embedding_dim,

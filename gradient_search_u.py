@@ -139,8 +139,8 @@ def load_flow(flow_path: str, device: str = "cuda"):
 
     # Extract architecture parameters
     dim = checkpoint.get('dim', checkpoint.get('embedding_dim', 768))
-    num_layers = checkpoint.get('num_layers', 8)
-    hidden_dim = checkpoint.get('hidden_dim', 512)
+    num_layers = checkpoint.get('num_layers', 4)  # Default to 4 for small datasets
+    hidden_dim = checkpoint.get('hidden_dim', 128)  # Default to 128 for small datasets
     dropout = checkpoint.get('dropout', 0.0)  # Dropout will be disabled in eval mode
 
     print(f"  Dimension: {dim}")

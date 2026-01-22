@@ -176,12 +176,12 @@ class NormalizingFlow(nn.Module):
 
     Maps latent codes z to standard Gaussian base distribution u ~ N(0, I)
     """
-    def __init__(self, dim: int, num_layers: int = 8, hidden_dim: int = 512, dropout: float = 0.0):
+    def __init__(self, dim: int, num_layers: int = 4, hidden_dim: int = 128, dropout: float = 0.0):
         """
         Args:
             dim: Dimension of latent space
-            num_layers: Number of coupling layers
-            hidden_dim: Hidden dimension for coupling networks
+            num_layers: Number of coupling layers (default: 4 for small datasets)
+            hidden_dim: Hidden dimension for coupling networks (default: 128 for small datasets)
             dropout: Dropout probability for regularization (default: 0.0)
         """
         super().__init__()
@@ -448,9 +448,10 @@ if __name__ == '__main__':
     batch_size = 32
 
     # Create model (with dropout for training)
-    flow = NormalizingFlow(dim=dim, num_layers=8, hidden_dim=512, dropout=0.1)
+    flow = NormalizingFlow(dim=dim, num_layers=4, hidden_dim=128, dropout=0.1)
     print(f"Created flow model with {sum(p.numel() for p in flow.parameters()):,} parameters")
     print(f"Dropout: 0.1 (active in training mode only)")
+    print(f"Architecture: 4 layers, hidden_dim=128 (suitable for small datasets)")
 
     # Test forward and inverse
     z = torch.randn(batch_size, dim)
