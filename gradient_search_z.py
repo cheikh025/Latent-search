@@ -420,6 +420,8 @@ def gradient_search_pipeline(
             device=device,
             show_progress_bar=True
         )
+        # Convert to float32 for predictor (encoder outputs float16)
+        init_embeddings = init_embeddings.float()
 
     # Score existing heuristics with predictor
     print("Scoring with predictor...")
@@ -567,7 +569,7 @@ def gradient_search_pipeline(
                     convert_to_tensor=True,
                     device=device,
                     show_progress_bar=False
-                )
+                ).float()  # Convert to float32
             del encoder_model
             torch.cuda.empty_cache()
 
