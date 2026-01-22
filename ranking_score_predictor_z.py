@@ -403,7 +403,7 @@ def train_ranking_predictor(
     for epoch in range(epochs):
         # Training
         predictor.train()
-        train_loss = 0.0
+        train_loss = torch.tensor(0.0, device=device)
         n_batches = 0
 
         for z_better, z_worse, _ in train_loader:
@@ -421,15 +421,16 @@ def train_ranking_predictor(
             torch.nn.utils.clip_grad_norm_(predictor.parameters(), max_norm=1.0)
             optimizer.step()
 
-            train_loss += loss.item()
+            # Accumulate as tensor to avoid CPU-GPU sync
+            train_loss += loss.detach()
             n_batches += 1
 
-        avg_train_loss = train_loss / max(n_batches, 1)
+        avg_train_loss = train_loss.item() / max(n_batches, 1)
 
         # Validation
         predictor.eval()
-        val_loss = 0.0
-        correct = 0
+        val_loss = torch.tensor(0.0, device=device)
+        correct = torch.tensor(0.0, device=device)
         total = 0
 
         with torch.no_grad():
@@ -441,14 +442,14 @@ def train_ranking_predictor(
                 score_worse = predictor(z_worse).squeeze()
 
                 loss = criterion(score_better, score_worse)
-                val_loss += loss.item()
+                val_loss += loss
 
                 # Pairwise accuracy
-                correct += (score_better > score_worse).sum().item()
+                correct += (score_better > score_worse).sum()
                 total += len(score_better)
 
-        avg_val_loss = val_loss / max(len(val_loader), 1)
-        val_accuracy = correct / max(total, 1)
+        avg_val_loss = val_loss.item() / max(len(val_loader), 1)
+        val_accuracy = correct.item() / max(total, 1)
 
         scheduler.step(avg_val_loss)
 

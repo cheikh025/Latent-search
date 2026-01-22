@@ -326,7 +326,7 @@ def train_flow(
     best_loss = float('inf')
 
     for epoch in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss = torch.tensor(0.0, device=device)
         num_batches = 0
 
         for (z_batch,) in dataloader:
@@ -347,11 +347,11 @@ def train_flow(
             # Update parameters
             optimizer.step()
 
-            epoch_loss += loss.item()
+            epoch_loss += loss.detach()
             num_batches += 1
 
         # Average loss for epoch
-        avg_loss = epoch_loss / max(num_batches, 1)
+        avg_loss = epoch_loss.item() / max(num_batches, 1)
 
         # Update learning rate
         scheduler.step(avg_loss)
