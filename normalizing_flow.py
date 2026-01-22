@@ -11,31 +11,47 @@ class CouplingLayer(nn.Module):
     Affine coupling layer for RealNVP-style normalizing flow.
     Splits input into two parts and applies invertible affine transformation.
     """
-    def __init__(self, dim: int, hidden_dim: int, mask: torch.Tensor):
+    def __init__(self, dim: int, hidden_dim: int, mask: torch.Tensor, dropout: float = 0.0):
         super().__init__()
         self.register_buffer('mask', mask)
 
         # Scale network: outputs log(scale) for numerical stability
-        self.scale_net = nn.Sequential(
+        scale_layers = [
             nn.Linear(dim, hidden_dim),
             nn.LeakyReLU(0.2),
+        ]
+        if dropout > 0:
+            scale_layers.append(nn.Dropout(dropout))
+        scale_layers.extend([
             nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(0.2),
+        ])
+        if dropout > 0:
+            scale_layers.append(nn.Dropout(dropout))
+        scale_layers.extend([
             nn.Linear(hidden_dim, dim),
             nn.Tanh()  # Constrain to [-1, 1], then scale
-        )
+        ])
+        self.scale_net = nn.Sequential(*scale_layers)
 
         # Translation network
-        self.translate_net = nn.Sequential(
+        translate_layers = [
             nn.Linear(dim, hidden_dim),
             nn.LeakyReLU(0.2),
+        ]
+        if dropout > 0:
+            translate_layers.append(nn.Dropout(dropout))
+        translate_layers.extend([
             nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, dim)
-        )
+        ])
+        if dropout > 0:
+            translate_layers.append(nn.Dropout(dropout))
+        translate_layers.append(nn.Linear(hidden_dim, dim))
+        self.translate_net = nn.Sequential(*translate_layers)
 
         # Scaling factor for tanh output (prevents extreme scales)
-        self.scale_factor = 2.0
+        self.scale_factor = 0.8
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -160,16 +176,18 @@ class NormalizingFlow(nn.Module):
 
     Maps latent codes z to standard Gaussian base distribution u ~ N(0, I)
     """
-    def __init__(self, dim: int, num_layers: int = 8, hidden_dim: int = 512):
+    def __init__(self, dim: int, num_layers: int = 8, hidden_dim: int = 512, dropout: float = 0.0):
         """
         Args:
             dim: Dimension of latent space
             num_layers: Number of coupling layers
             hidden_dim: Hidden dimension for coupling networks
+            dropout: Dropout probability for regularization (default: 0.0)
         """
         super().__init__()
         self.dim = dim
         self.num_layers = num_layers
+        self.dropout = dropout
 
         # Build alternating coupling layers
         self.layers = nn.ModuleList()
@@ -188,8 +206,8 @@ class NormalizingFlow(nn.Module):
             # Add ActNorm layer for stability
             self.actnorms.append(ActNorm(dim))
 
-            # Add coupling layer
-            self.layers.append(CouplingLayer(dim, hidden_dim, mask))
+            # Add coupling layer with dropout
+            self.layers.append(CouplingLayer(dim, hidden_dim, mask, dropout=dropout))
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -429,9 +447,10 @@ if __name__ == '__main__':
     dim = 768  # Typical embedding dimension
     batch_size = 32
 
-    # Create model
-    flow = NormalizingFlow(dim=dim, num_layers=8, hidden_dim=512)
+    # Create model (with dropout for training)
+    flow = NormalizingFlow(dim=dim, num_layers=8, hidden_dim=512, dropout=0.1)
     print(f"Created flow model with {sum(p.numel() for p in flow.parameters()):,} parameters")
+    print(f"Dropout: 0.1 (active in training mode only)")
 
     # Test forward and inverse
     z = torch.randn(batch_size, dim)

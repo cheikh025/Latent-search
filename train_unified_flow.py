@@ -524,7 +524,7 @@ def validate_flow(flow_model: NormalizingFlow, z_combined: np.ndarray, device: s
 # Main Training Script
 # ============================================================================
 
-def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
+def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1, dropout: float = 0.1):
     """Main training pipeline for unified normalizing flow."""
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -597,7 +597,8 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
     flow_model = NormalizingFlow(
         dim=embedding_dim,
         num_layers=num_layers,
-        hidden_dim=hidden_dim
+        hidden_dim=hidden_dim,
+        dropout=dropout
     )
 
     num_params = sum(p.numel() for p in flow_model.parameters())
@@ -605,6 +606,7 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
     print(f"  Dimension: {embedding_dim}")
     print(f"  Layers: {num_layers}")
     print(f"  Hidden dim: {hidden_dim}")
+    print(f"  Dropout: {dropout}")
     print(f"  Parameters: {num_params:,}")
     print()
 
@@ -657,6 +659,7 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
         'programs_per_task': task_counts,
         'embedding_dim': embedding_dim,
         'hidden_dim': hidden_dim,
+        'dropout': dropout,
         'encoder': 'BAAI/bge-code-v1',
         'optimizer': 'AdamW',
         'initial_lr': learning_rate,
@@ -705,12 +708,13 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
         'dim': embedding_dim,
         'num_layers': num_layers,
         'hidden_dim': hidden_dim,
+        'dropout': dropout,
         'tasks_trained': list(task_counts.keys()),
         'total_programs': len(z_combined),
         'programs_per_task': task_counts,
         'embedding_dim': embedding_dim,
         'encoder': 'BAAI/bge-code-v1',
-        'architecture': 'RealNVP with ActNorm',
+        'architecture': 'RealNVP with ActNorm + Dropout',
         'training': {
             'optimizer': 'AdamW',
             'initial_lr': learning_rate,
@@ -719,6 +723,7 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
             'batch_size': 128,
             'epochs': 200,
             'holdout_ratio': holdout_ratio,
+            'dropout': dropout,
             'gradient_clipping': 5.0,
         }
     }
@@ -734,8 +739,9 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1):
     print(f"  Training split: {int((1-holdout_ratio)*len(z_combined))} train, {int(holdout_ratio*len(z_combined))} val")
     print(f"  Tasks trained: {len(task_counts)}")
     print(f"  Model parameters: {num_params:,}")
-    print(f"  Architecture: RealNVP with ActNorm")
+    print(f"  Architecture: RealNVP with ActNorm + Dropout")
     print(f"  Layers: {num_layers}")
+    print(f"  Dropout: {dropout}")
     print(f"  Holdout ratio: {holdout_ratio}")
     print(f"  Final checkpoint: {final_path}")
     print(f"  Best checkpoint: {os.path.join(checkpoint_dir, 'unified_flow_best.pth')}")
@@ -765,6 +771,12 @@ if __name__ == "__main__":
         default=0.1,
         help="Fraction of data to hold out for validation (default: 0.1)"
     )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.1,
+        help="Dropout probability for regularization (default: 0.1)"
+    )
     args = parser.parse_args()
 
-    main(resume_checkpoint=args.resume, holdout_ratio=args.holdout_ratio)
+    main(resume_checkpoint=args.resume, holdout_ratio=args.holdout_ratio, dropout=args.dropout)

@@ -141,16 +141,18 @@ def load_flow(flow_path: str, device: str = "cuda"):
     dim = checkpoint.get('dim', checkpoint.get('embedding_dim', 768))
     num_layers = checkpoint.get('num_layers', 8)
     hidden_dim = checkpoint.get('hidden_dim', 512)
+    dropout = checkpoint.get('dropout', 0.0)  # Dropout will be disabled in eval mode
 
     print(f"  Dimension: {dim}")
     print(f"  Layers: {num_layers}")
     print(f"  Hidden dim: {hidden_dim}")
+    print(f"  Dropout: {dropout} (disabled in eval mode)")
 
-    # Create flow model
-    flow_model = NormalizingFlow(dim=dim, num_layers=num_layers, hidden_dim=hidden_dim)
+    # Create flow model with dropout (will be disabled in eval mode)
+    flow_model = NormalizingFlow(dim=dim, num_layers=num_layers, hidden_dim=hidden_dim, dropout=dropout)
     flow_model.load_state_dict(checkpoint['model_state_dict'])
     flow_model.to(device)
-    flow_model.eval()
+    flow_model.eval()  # This disables dropout
 
     print(f"  ✓ Flow loaded")
     return flow_model
