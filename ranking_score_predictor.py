@@ -309,12 +309,13 @@ class RankingLoss(nn.Module):
 
     P(i > j) = sigmoid(tau * (R(u_i) - R(u_j)))
     loss = -log(P(i > j))
+
+    Uses numerically stable logsigmoid implementation.
     """
 
-    def __init__(self, tau: float = 1.0, margin: float = 0.0):
+    def __init__(self, tau: float = 1.0):
         super().__init__()
         self.tau = tau
-        self.margin = margin
 
     def forward(self, score_better: torch.Tensor, score_worse: torch.Tensor) -> torch.Tensor:
         """
@@ -325,22 +326,10 @@ class RankingLoss(nn.Module):
         Returns:
             loss: Scalar loss value
         """
-        diff = score_better - score_worse - self.margin
-        prob = torch.sigmoid(self.tau * diff)
-        loss = -torch.log(prob + 1e-8).mean()
+        diff = score_better - score_worse
+        # Use numerically stable logsigmoid instead of log(sigmoid())
+        loss = -F.logsigmoid(self.tau * diff).mean()
         return loss
-
-
-class MarginRankingLossWrapper(nn.Module):
-    """Wrapper around PyTorch's MarginRankingLoss for our interface."""
-
-    def __init__(self, margin: float = 0.1):
-        super().__init__()
-        self.loss_fn = nn.MarginRankingLoss(margin=margin)
-
-    def forward(self, score_better: torch.Tensor, score_worse: torch.Tensor) -> torch.Tensor:
-        target = torch.ones_like(score_better)
-        return self.loss_fn(score_better, score_worse, target)
 
 
 def train_ranking_predictor(
@@ -350,9 +339,7 @@ def train_ranking_predictor(
     batch_size: int = 64,
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
-    loss_type: str = 'soft',  # 'soft' or 'margin'
     tau: float = 1.0,
-    margin: float = 0.1,
     val_split: float = 0.1,
     device: str = 'cuda',
     verbose: bool = True,
@@ -368,9 +355,7 @@ def train_ranking_predictor(
         batch_size: Training batch size
         lr: Learning rate
         weight_decay: L2 regularization
-        loss_type: 'soft' (sigmoid+BCE) or 'margin' (hinge)
-        tau: Temperature for soft ranking loss
-        margin: Margin for ranking losses
+        tau: Temperature for soft ranking loss (higher = sharper gradients)
         val_split: Fraction for validation
         device: Device to train on
         verbose: Print progress
@@ -396,13 +381,8 @@ def train_ranking_predictor(
 
     print(f"Training on {n_train} pairs, validating on {n_val} pairs")
 
-    # Loss function
-    if loss_type == 'soft':
-        criterion = RankingLoss(tau=tau, margin=margin)
-    elif loss_type == 'margin':
-        criterion = MarginRankingLossWrapper(margin=margin)
-    else:
-        raise ValueError(f"Unknown loss_type: {loss_type}")
+    # Loss function (soft ranking loss with numerically stable logsigmoid)
+    criterion = RankingLoss(tau=tau)
 
     # Move to device
     predictor = predictor.to(device)
@@ -569,9 +549,7 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension')
     parser.add_argument('--num_layers', type=int, default=2, help='Number of layers')
-    parser.add_argument('--loss_type', type=str, default='soft', choices=['soft', 'margin'])
-    parser.add_argument('--tau', type=float, default=1.0, help='Temperature for soft loss')
-    parser.add_argument('--margin', type=float, default=0.1, help='Margin for ranking loss')
+    parser.add_argument('--tau', type=float, default=1.0, help='Temperature for soft ranking loss (higher = sharper gradients)')
     parser.add_argument('--min_score_diff', type=float, default=0.0, help='Min score diff for pairs')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
     parser.add_argument('--cache_dir', type=str, default='cache', help='Cache directory')
@@ -583,7 +561,7 @@ def main():
     print("="*70)
     print(f"Task: {args.task}")
     print(f"Flow model: {args.flow_path}")
-    print(f"Loss type: {args.loss_type}")
+    print(f"Loss: Soft ranking (tau={args.tau})")
     print(f"Device: {args.device}")
     print()
 
@@ -638,9 +616,7 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        loss_type=args.loss_type,
         tau=args.tau,
-        margin=args.margin,
         device=args.device,
         verbose=True
     )
@@ -652,9 +628,8 @@ def main():
         history=history,
         extra_info={
             'task': args.task,
-            'loss_type': args.loss_type,
+            'loss_type': 'soft',
             'tau': args.tau,
-            'margin': args.margin,
             'n_pairs': len(dataset),
             'n_programs': len(df)
         }
