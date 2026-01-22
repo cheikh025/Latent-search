@@ -200,53 +200,36 @@ def multi_start_gradient_search(
     steps: int = 100,
     lr: float = 0.01,
     init_from_data: torch.Tensor = None,
-    init_noise: float = 0.1,
-    top_k_init: int = 5,
     device: str = 'cuda',
     verbose: bool = True
 ) -> torch.Tensor:
     """
-    Multi-start gradient search with different initialization strategies.
+    Multi-start gradient search initialized from existing data.
 
     Args:
         predictor: Trained ranking predictor
         num_starts: Number of parallel searches
         steps: Gradient steps per search
         lr: Learning rate
-        init_from_data: Optional tensor of existing z vectors to initialize from
-        init_noise: Noise to add to data-initialized starts
-        top_k_init: Number of top embeddings to use for initialization
+        init_from_data: Tensor of existing z vectors to initialize from (required)
         device: Device to use
         verbose: Print progress
 
     Returns:
         Optimized z vectors [num_starts, dim]
     """
-    dim = predictor.input_dim
+    if init_from_data is None or len(init_from_data) == 0:
+        raise ValueError("init_from_data is required - must provide existing z vectors")
 
-    if init_from_data is not None and len(init_from_data) > 0:
-        # Initialize from top-k data points + noise
-        n_from_data = min(num_starts, len(init_from_data), top_k_init)
-        n_random = num_starts - n_from_data
+    # Initialize from top data points (no noise)
+    n_available = len(init_from_data)
+    n_to_use = min(num_starts, n_available)
 
-        # Sample from top embeddings
-        init_z_data = init_from_data[:n_from_data].clone()
-        init_z_data += init_noise * torch.randn_like(init_z_data)
+    # Take top-n embeddings directly (already sorted by score)
+    init_z = init_from_data[:n_to_use].clone().to(device)
 
-        if n_random > 0:
-            # Add some random starts for exploration
-            init_z_random = torch.randn(n_random, dim, device=device)
-            init_z = torch.cat([init_z_data.to(device), init_z_random], dim=0)
-        else:
-            init_z = init_z_data.to(device)
-
-        if verbose:
-            print(f"Initialized {n_from_data} from data, {n_random} random")
-    else:
-        # Pure random initialization
-        init_z = torch.randn(num_starts, dim, device=device)
-        if verbose:
-            print(f"Initialized {num_starts} random starts")
+    if verbose:
+        print(f"Initialized {n_to_use} searches from top-{n_to_use} embeddings (no noise)")
 
     # Run gradient ascent
     optimized_z = gradient_ascent_z(
@@ -471,8 +454,6 @@ def gradient_search_pipeline(
             steps=gradient_steps,
             lr=lr,
             init_from_data=init_embeddings,
-            init_noise=0.1,
-            top_k_init=10,
             device=device,
             verbose=verbose
         )
