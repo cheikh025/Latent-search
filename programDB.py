@@ -1,3 +1,4 @@
+from collections import Counter
 # program_database.py
 
 import pandas as pd
@@ -78,7 +79,18 @@ def are_codes_structurally_same(code1_str: str, code2_str: str) -> bool:
         # If code can't be parsed, it's not valid Python.
         return False
 
-
+def get_structure_hash(code_str: str) -> Optional[str]:
+    """
+    Computes a normalized structure hash for a piece of code.
+    Returns None if the code is invalid.
+    """
+    try:
+        tree = ast.parse(code_str)
+        normalizer = CodeNormalizer()
+        normalized_tree = normalizer.visit(tree)
+        return ast.dump(normalized_tree)
+    except SyntaxError:
+        return None
 
 
 class ProgramDatabase:
@@ -93,6 +105,8 @@ class ProgramDatabase:
         )
         self.df.set_index("program_id", inplace=True)
         self.program_counter = 0
+        self.structure_hashes = Counter()
+
     def add_program(
         self,
         code,
@@ -102,6 +116,12 @@ class ProgramDatabase:
         generation: int = 0,
     ) -> int:
         """Insert a new program  Returns the program_id."""
+
+        # Add hash to cache
+        hash_val = get_structure_hash(code)
+        if hash_val:
+            self.structure_hashes[hash_val] += 1
+
         pid = self.program_counter
         self.program_counter += 1
 
@@ -131,6 +151,12 @@ class ProgramDatabase:
     def remove_program(self, program_id):
         # Remove the row with the given program_id
         if program_id in self.df.index:
+            code = self.df.loc[program_id, 'code']
+            hash_val = get_structure_hash(code)
+            if hash_val and hash_val in self.structure_hashes:
+                 self.structure_hashes[hash_val] -= 1
+                 if self.structure_hashes[hash_val] <= 0:
+                     del self.structure_hashes[hash_val]
             self.df.drop(program_id, inplace=True)
 
     def get_top_n(self, n=5):
@@ -143,7 +169,12 @@ class ProgramDatabase:
         return self.df.loc[program_id]
 
     def exists(self, code_to_check):
-        #return (self.df['code'] == code).any()
+        # Fast check using hash set
+        hash_val = get_structure_hash(code_to_check)
+        if hash_val:
+            return self.structure_hashes[hash_val] > 0
+
+        # Fallback to slow method if parsing fails (unlikely if code_to_check is valid)
         return self.df['code'].apply(lambda existing_code: are_codes_structurally_same(code_to_check, existing_code)).any()
 
     def to_disk(self, path):
@@ -159,6 +190,13 @@ class ProgramDatabase:
         #self.df.set_index('program_id', inplace=True)
         self.df['z'] = self.df['z'].apply(lambda x: np.squeeze(np.array(x, dtype=np.float32)))
         self.program_counter = len(self.df)
+
+        # Rebuild hash cache
+        self.structure_hashes = Counter()
+        for code in self.df['code']:
+            hash_val = get_structure_hash(code)
+            if hash_val:
+                self.structure_hashes[hash_val] += 1
 
     def __len__(self):
         return len(self.df)
