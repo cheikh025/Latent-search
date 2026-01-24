@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, List, Sequence
 from sklearn.cluster import KMeans
 from tqdm.notebook import tqdm
+import hashlib
+from collections import Counter
 
 import ast
 from base.code import TextFunctionProgramConverter
@@ -79,6 +81,21 @@ def are_codes_structurally_same(code1_str: str, code2_str: str) -> bool:
         return False
 
 
+def get_structure_hash(code_str: str) -> Optional[str]:
+    """
+    Computes a hash of the normalized structure of the code.
+    Returns None if code is invalid.
+    """
+    try:
+        tree = ast.parse(code_str)
+        normalizer = CodeNormalizer()
+        normalized_tree = normalizer.visit(tree)
+        dump = ast.dump(normalized_tree)
+        return hashlib.sha256(dump.encode('utf-8')).hexdigest()
+    except SyntaxError:
+        return None
+
+
 
 
 class ProgramDatabase:
@@ -93,6 +110,8 @@ class ProgramDatabase:
         )
         self.df.set_index("program_id", inplace=True)
         self.program_counter = 0
+        self.structure_hashes = Counter()
+
     def add_program(
         self,
         code,
@@ -105,6 +124,10 @@ class ProgramDatabase:
         pid = self.program_counter
         self.program_counter += 1
 
+        # Update structure hash cache
+        h = get_structure_hash(code)
+        if h:
+            self.structure_hashes[h] += 1
         
         if isinstance(z, torch.Tensor):
             z = z.detach().cpu().numpy().astype(np.float32)
@@ -131,6 +154,10 @@ class ProgramDatabase:
     def remove_program(self, program_id):
         # Remove the row with the given program_id
         if program_id in self.df.index:
+            code = self.df.loc[program_id, 'code']
+            h = get_structure_hash(code)
+            if h:
+                self.structure_hashes[h] -= 1
             self.df.drop(program_id, inplace=True)
 
     def get_top_n(self, n=5):
@@ -143,8 +170,10 @@ class ProgramDatabase:
         return self.df.loc[program_id]
 
     def exists(self, code_to_check):
-        #return (self.df['code'] == code).any()
-        return self.df['code'].apply(lambda existing_code: are_codes_structurally_same(code_to_check, existing_code)).any()
+        h = get_structure_hash(code_to_check)
+        if h and self.structure_hashes[h] > 0:
+            return True
+        return False
 
     def to_disk(self, path):
         df_copy = self.df.copy()
@@ -159,6 +188,14 @@ class ProgramDatabase:
         #self.df.set_index('program_id', inplace=True)
         self.df['z'] = self.df['z'].apply(lambda x: np.squeeze(np.array(x, dtype=np.float32)))
         self.program_counter = len(self.df)
+
+        # Rebuild structure hashes
+        self.structure_hashes = Counter()
+        print("Rebuilding structure hashes...")
+        for code in tqdm(self.df['code'], desc="Hashing programs"):
+            h = get_structure_hash(code)
+            if h:
+                self.structure_hashes[h] += 1
 
     def __len__(self):
         return len(self.df)
