@@ -8,6 +8,7 @@ import json
 import utils as utils
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Sequence
+from collections import Counter
 from sklearn.cluster import KMeans
 from tqdm.notebook import tqdm
 
@@ -50,33 +51,31 @@ class CodeNormalizer(ast.NodeTransformer):
         node.arg = self.get_normalized_name(node.arg)
         return node
 
+def get_structural_hash(code_str: str) -> str:
+    """
+    Returns a hashable string representation of the normalized AST.
+    """
+    try:
+        # 1. Parse code string into AST
+        tree = ast.parse(code_str)
+
+        # 2. Normalize the tree
+        normalizer = CodeNormalizer()
+        normalized_tree = normalizer.visit(tree)
+
+        # 3. Return the string dump of the normalized tree
+        return ast.dump(normalized_tree)
+    except SyntaxError:
+        return ""
+
 def are_codes_structurally_same(code1_str: str, code2_str: str) -> bool:
     """
     Checks if two Python code strings are structurally equivalent,
     ignoring comments, whitespace, and variable/function names.
     """
-    try:
-        # 1. Parse code strings into ASTs
-        tree1 = ast.parse(code1_str)
-        tree2 = ast.parse(code2_str)
-
-        # 2. Normalize both trees
-        normalizer1 = CodeNormalizer()
-        normalized_tree1 = normalizer1.visit(tree1)
-
-        normalizer2 = CodeNormalizer()
-        normalized_tree2 = normalizer2.visit(tree2)
-
-        # 3. Compare the string dump of the normalized trees
-        # ast.dump provides a consistent string representation of the tree's structure.
-        dump1 = ast.dump(normalized_tree1)
-        dump2 = ast.dump(normalized_tree2)
-
-        return dump1 == dump2
-
-    except SyntaxError:
-        # If code can't be parsed, it's not valid Python.
-        return False
+    h1 = get_structural_hash(code1_str)
+    h2 = get_structural_hash(code2_str)
+    return h1 and h2 and h1 == h2
 
 
 
@@ -93,6 +92,8 @@ class ProgramDatabase:
         )
         self.df.set_index("program_id", inplace=True)
         self.program_counter = 0
+        self.structure_hashes = Counter()
+
     def add_program(
         self,
         code,
@@ -118,6 +119,11 @@ class ProgramDatabase:
         else:
             mean_score = float(score) if score is not None and np.isfinite(score) else np.nan
 
+        # Update structural hash cache
+        h = get_structural_hash(code)
+        if h:
+            self.structure_hashes[h] += 1
+
         row = {
             "program_id": pid,
             "code": code,
@@ -131,6 +137,20 @@ class ProgramDatabase:
     def remove_program(self, program_id):
         # Remove the row with the given program_id
         if program_id in self.df.index:
+            codes = self.df.loc[program_id, 'code']
+            # Handle potential duplicates (if program_id is not unique)
+            if isinstance(codes, pd.Series):
+                code_list = codes.tolist()
+            else:
+                code_list = [codes]
+
+            for code in code_list:
+                h = get_structural_hash(code)
+                if h and self.structure_hashes[h] > 0:
+                    self.structure_hashes[h] -= 1
+                    if self.structure_hashes[h] == 0:
+                        del self.structure_hashes[h]
+
             self.df.drop(program_id, inplace=True)
 
     def get_top_n(self, n=5):
@@ -143,8 +163,9 @@ class ProgramDatabase:
         return self.df.loc[program_id]
 
     def exists(self, code_to_check):
-        #return (self.df['code'] == code).any()
-        return self.df['code'].apply(lambda existing_code: are_codes_structurally_same(code_to_check, existing_code)).any()
+        # Optimization: use precomputed hashes
+        h = get_structural_hash(code_to_check)
+        return self.structure_hashes[h] > 0
 
     def to_disk(self, path):
         df_copy = self.df.copy()
@@ -159,6 +180,14 @@ class ProgramDatabase:
         #self.df.set_index('program_id', inplace=True)
         self.df['z'] = self.df['z'].apply(lambda x: np.squeeze(np.array(x, dtype=np.float32)))
         self.program_counter = len(self.df)
+
+        # Rebuild hash cache
+        self.structure_hashes.clear()
+        print("Rebuilding structural hash cache...")
+        for code in tqdm(self.df['code'], desc="Hashing programs"):
+             h = get_structural_hash(code)
+             if h:
+                 self.structure_hashes[h] += 1
 
     def __len__(self):
         return len(self.df)
