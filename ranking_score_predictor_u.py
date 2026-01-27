@@ -558,15 +558,26 @@ def main():
     from normalizing_flow import NormalizingFlow
 
     flow_checkpoint = torch.load(args.flow_path, map_location=args.device)
+    flow_dim = flow_checkpoint.get('dim', flow_checkpoint.get('flow_dim', flow_checkpoint.get('embedding_dim', 768)))
+    flow_num_layers = flow_checkpoint.get('num_layers', flow_checkpoint.get('flow_num_layers', 4))
+    flow_hidden_dim = flow_checkpoint.get('hidden_dim', flow_checkpoint.get('flow_hidden_dim', 128))
+    flow_dropout = flow_checkpoint.get('dropout', flow_checkpoint.get('flow_dropout', 0.0))
+
     flow_model = NormalizingFlow(
-        dim=flow_checkpoint['dim'],
-        num_layers=flow_checkpoint['num_layers'],
-        hidden_dim=flow_checkpoint.get('hidden_dim', 512)
+        dim=flow_dim,
+        num_layers=flow_num_layers,
+        hidden_dim=flow_hidden_dim,
+        dropout=flow_dropout
     )
-    flow_model.load_state_dict(flow_checkpoint['model_state_dict'])
+
+    flow_state = flow_checkpoint.get('model_state_dict', flow_checkpoint.get('flow_state_dict'))
+    if flow_state is None:
+        raise KeyError("Flow checkpoint missing model_state_dict/flow_state_dict")
+
+    flow_model.load_state_dict(flow_state)
     flow_model.to(args.device)
     flow_model.eval()
-    print(f"Loaded flow model: dim={flow_checkpoint['dim']}")
+    print(f"Loaded flow model: dim={flow_dim}, layers={flow_num_layers}, hidden={flow_hidden_dim}, dropout={flow_dropout}")
 
     # Create dataset
     dataset, df = create_dataset_from_task(
@@ -584,7 +595,7 @@ def main():
     print(f"\nDataset size: {len(dataset)} pairs")
 
     # Create predictor - input_dim comes from flow (u-space has same dim as z-space)
-    input_dim = flow_checkpoint['dim']
+    input_dim = flow_dim
     predictor = RankingScorePredictor(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
