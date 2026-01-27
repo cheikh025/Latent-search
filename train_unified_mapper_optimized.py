@@ -218,7 +218,7 @@ def encode_all_heuristics(
 # Checkpoint Loading
 # ============================================================================
 
-def load_checkpoint_for_resume(checkpoint_path: str, mapper_model, optimizer=None, scheduler=None):
+def load_checkpoint_for_resume(checkpoint_path: str, mapper_model, optimizer=None, scheduler=None, device=None):
     """Load checkpoint for resuming training."""
     print(f"\n{'='*70}")
     print(f"Loading Checkpoint for Resume Training")
@@ -233,6 +233,12 @@ def load_checkpoint_for_resume(checkpoint_path: str, mapper_model, optimizer=Non
 
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Move optimizer state tensors to the correct device
+        if device is not None:
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
         print(f"Loaded optimizer state")
 
     if scheduler is not None and 'scheduler_state_dict' in checkpoint:
@@ -619,11 +625,15 @@ def main(resume_checkpoint: Optional[str] = None):
 
     start_epoch = 0
     if resume_checkpoint is not None:
+        # Get the device from the decoder's embedding layer (where mapper will be moved)
+        embed_layer = decoder_model.get_input_embeddings()
+        target_device = embed_layer.weight.device
         start_epoch, _ = load_checkpoint_for_resume(
             checkpoint_path=resume_checkpoint,
             mapper_model=mapper_model,
             optimizer=optimizer,
-            scheduler=scheduler
+            scheduler=scheduler,
+            device=target_device
         )
 
     # ========================================================================
@@ -697,7 +707,20 @@ def main(resume_checkpoint: Optional[str] = None):
     final_path = os.path.join(checkpoint_dir, "unified_mapper_optimized.pth")
     torch.save(checkpoint_data, final_path)
 
+    # Save weights-only checkpoint (smaller, for inference/deployment)
+    weights_only_data = {
+        'model_state_dict': trained_mapper.state_dict(),
+        'input_dim': input_dim,
+        'output_dim': output_dim,
+        'num_tokens': num_tokens,
+        'tasks_trained': list(TASK_PROMPTS.keys()),
+        'decoder_model': 'Qwen/Qwen3-4B-Instruct-2507',
+    }
+    weights_only_path = os.path.join(checkpoint_dir, "unified_mapper_weights_only.pth")
+    torch.save(weights_only_data, weights_only_path)
+
     print(f"Final model saved to: {final_path}")
+    print(f"Weights-only model saved to: {weights_only_path}")
     print(f"\nTraining Complete!")
     print(f"{'='*70}\n")
 
@@ -708,7 +731,8 @@ def main(resume_checkpoint: Optional[str] = None):
     print(f"  Decoder: Qwen3-4B-Instruct-2507")
     print(f"  Optimizations: Flash Attention 2, Gradient Checkpointing, torch.compile(default)")
     print(f"  Batch: 8 x 2 accumulation = 16 effective")
-    print(f"  Checkpoint: {final_path}")
+    print(f"  Full checkpoint (for resume): {final_path}")
+    print(f"  Weights-only (for inference): {weights_only_path}")
     print()
 
 
