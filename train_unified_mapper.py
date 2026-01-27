@@ -44,16 +44,16 @@ from utils import is_valid_python
 # ============================================================================
 
 TASK_PROMPTS = {
-    'tsp_construct': "Based on the above context, write a Python function that implements a heuristic for the Traveling Salesman Problem (TSP).",
-    'cvrp_construct': "Based on the above context, write a Python function that implements a heuristic for the Capacitated Vehicle Routing Problem (CVRP).",
-    'vrptw_construct': "Based on the above context, write a Python function that implements a heuristic for the Vehicle Routing Problem with Time Windows (VRPTW).",
-    'jssp_construct': "Based on the above context, write a Python function that implements a heuristic for the Job Shop Scheduling Problem (JSSP).",
-    'knapsack_construct': "Based on the above context, write a Python function that implements a heuristic for the 0/1 Knapsack Problem.",
-    'online_bin_packing': "Based on the above context, write a Python function that implements an online heuristic for the Bin Packing Problem.",
-    'qap_construct': "Based on the above context, write a Python function that implements a heuristic for the Quadratic Assignment Problem (QAP).",
-    'cflp_construct': "Based on the above context, write a Python function that implements a heuristic for the Capacitated Facility Location Problem (CFLP).",
-    'set_cover_construct': "Based on the above context, write a Python function that implements a greedy heuristic for the Set Cover Problem.",
-    'admissible_set': "Based on the above context, write a Python function that implements a heuristic for computing admissible sets."
+    'tsp_construct': "Based on the above context, write a Python function that implements a TSP heuristic. Visit each node once and return to the start by choosing the next node step-by-step from the current node.",
+    'cvrp_construct': "Based on the above context, write a Python function that implements a CVRP heuristic. Build routes from a depot while respecting vehicle capacity and choosing the next customer each step.",
+    'vrptw_construct': "Based on the above context, write a Python function that implements a VRPTW heuristic. Choose the next customer step-by-step while respecting time windows, capacity, and travel times.",
+    'jssp_construct': "Based on the above context, write a Python function that implements a JSSP heuristic. Schedule the next feasible operation to reduce overall makespan given machine and job constraints.",
+    'knapsack_construct': "Based on the above context, write a Python function that implements a 0/1 knapsack heuristic. Select the next item to pack given remaining capacity and item weights/values.",
+    'online_bin_packing': "Based on the above context, write a Python function that implements an online bin packing heuristic. Return a priority score for each bin to place the incoming item.",
+    'qap_construct': "Based on the above context, write a Python function that implements a QAP heuristic. Extend a partial assignment of facilities to locations to reduce interaction cost.",
+    'cflp_construct': "Based on the above context, write a Python function that implements a CFLP heuristic. Assign customers to facilities step-by-step while respecting capacity and minimizing cost.",
+    'set_cover_construct': "Based on the above context, write a Python function that implements a greedy set cover heuristic. Pick the next subset to cover remaining elements.",
+    'admissible_set': "Based on the above context, write a Python function that implements a heuristic priority score for adding a candidate vector to an admissible set."
 }
 
 # ============================================================================
