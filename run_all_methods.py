@@ -94,15 +94,73 @@ def add_seeds_to_funsearch(method, seeds):
             print(f"Skipping {name}: Evaluation failed (score is None).")
             continue
 
-        # FunSearch stores programs in its database
-        program = tfpc.text_to_program(code)
-        if program is None:
-            print(f"Warning: Failed to parse program '{name}', skipping.")
+        # FunSearch uses Function objects, not Program
+        func = tfpc.text_to_function(code)
+        if func is None:
+            print(f"Warning: Failed to parse function '{name}', skipping.")
             continue
-        program.score = score
-        method._programs_database.register_program(program)
+
+        # FunSearch's register_function takes score as a separate parameter
+        # island_id=None means add to all islands (for initialization)
+        method._programs_database.register_function(
+            function=func,
+            island_id=None,  # Add to all islands
+            score=score
+        )
+
         if method._profiler:
-            method._profiler.register_function(program, program=code, resume_mode=True)
+            # Set score for profiler logging
+            func.score = score
+            func.evaluate_time = eval_time
+            method._profiler.register_function(func, program=code, resume_mode=True)
+
+
+def add_seeds_to_hillclimb(method, seeds):
+    """
+    Helper function to initialize HillClimb with the BEST seed heuristic.
+    HillClimb is a local search method that starts from a single solution.
+    """
+    print("  Evaluating seeds to find best starting point for HillClimb...")
+
+    best_seed_name = None
+    best_seed_code = None
+    best_seed_score = float('-inf')
+    best_seed_eval_time = None
+
+    for name, code in seeds.items():
+        score, eval_time = method._evaluator.evaluate_program_record_time(code)
+        if score is None:
+            print(f"    Skipping {name}: Evaluation failed.")
+            continue
+
+        print(f"    {name}: score = {score:.6f}")
+
+        # Track the best seed
+        if score > best_seed_score:
+            best_seed_name = name
+            best_seed_code = code
+            best_seed_score = score
+            best_seed_eval_time = eval_time
+
+    if best_seed_code is None:
+        raise RuntimeError("No valid seed found for HillClimb!")
+
+    print(f"  Best seed: {best_seed_name} with score = {best_seed_score:.6f}")
+
+    # Initialize HillClimb with the best seed
+    func = tfpc.text_to_function(best_seed_code)
+    if func is None:
+        raise RuntimeError(f"Failed to parse best seed: {best_seed_name}")
+
+    func.score = best_seed_score
+    func.evaluate_time = best_seed_eval_time
+
+    # Set as starting point for hill climbing
+    method._best_function_found = func
+
+    # Register with profiler
+    if method._profiler:
+        method._profiler.register_function(func, program=best_seed_code, resume_mode=True)
 
 
 def add_seeds_to_lhns(method, seeds):
@@ -227,12 +285,12 @@ def run_hillclimb():
         max_sample_nums=MAX_SAMPLE_NUMS,
         num_samplers=NUM_SAMPLERS,
         num_evaluators=NUM_EVALUATORS,
+        resume_mode=True,  # Skip template evaluation
     )
 
-    # Note: HillClimb doesn't have a population structure for seeds
-    # It starts from a single solution and improves it iteratively
-    # If you want to use seeds, you would need to modify the approach
-    # For now, we'll just run it without seeds
+    # HillClimb starts from a single solution (local search)
+    # Initialize with the BEST seed as starting point
+    add_seeds_to_hillclimb(method, seeds)
 
     method.run()
     print("HillClimb completed!")
