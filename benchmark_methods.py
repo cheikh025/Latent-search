@@ -17,15 +17,19 @@ from typing import Dict, List, Tuple, Any
 from datetime import datetime
 import time
 
-# Import task evaluators
+# Import base evaluator
+from base.evaluate import SecureEvaluator
+
+# Import task evaluators (actual class names from the code)
 from task.tsp_construct.evaluation import TSPEvaluation
 from task.cvrp_construct.evaluation import CVRPEvaluation
 from task.knapsack_construct.evaluation import KnapsackEvaluation
 from task.jssp_construct.evaluation import JSSPEvaluation
 from task.vrptw_construct.evaluation import VRPTWEvaluation
 from task.qap_construct.evaluation import QAPEvaluation
-from task.set_cover_construct.evaluation import SetCoverEvaluation
+from task.set_cover_construct.evaluation import SCPEvaluation
 from task.cflp_construct.evaluation import CFLPEvaluation
+from task.online_bin_packing.evaluation import OBPEvaluation
 
 # Task configurations
 TASK_CONFIG = {
@@ -54,8 +58,12 @@ TASK_CONFIG = {
         'params': {'n_instance': 100, 'n_facilities': 20, 'timeout_seconds': 30}
     },
     'set_cover_construct': {
-        'evaluator': SetCoverEvaluation,
+        'evaluator': SCPEvaluation,
         'params': {'n_instance': 100, 'n_elements': 50, 'n_subsets': 30, 'max_subset_size': 10, 'timeout_seconds': 20}
+    },
+    'online_bin_packing': {
+        'evaluator': OBPEvaluation,
+        'params': {'n_instances': 100, 'n_items': 5000, 'capacity': 100, 'timeout_seconds': 30}
     },
     'cflp_construct': {
         'evaluator': CFLPEvaluation,
@@ -87,7 +95,13 @@ class BenchmarkRunner:
 
         # Initialize evaluator
         config = TASK_CONFIG[task_name]
-        self.evaluator = config['evaluator'](**config['params'])
+        base_evaluator = config['evaluator'](**config['params'])
+
+        # Wrap with SecureEvaluator for proper evaluation
+        self.evaluator = SecureEvaluator(base_evaluator, debug_mode=False)
+
+        # Get number of instances (different tasks use different param names)
+        self.n_instance = config['params'].get('n_instance', config['params'].get('n_instances', 'N/A'))
 
         print(f"Initialized {task_name} evaluator with {config['params']}")
 
@@ -125,8 +139,8 @@ class BenchmarkRunner:
         start_time = time.time()
 
         try:
-            # Evaluate the method
-            score = self.evaluator.evaluate_single_program(code)
+            # Evaluate the method using SecureEvaluator
+            score = self.evaluator.evaluate_program(code)
             eval_time = time.time() - start_time
 
             if score is None:
@@ -175,7 +189,7 @@ class BenchmarkRunner:
         print(f"\n{'#'*60}")
         print(f"# BENCHMARK: {self.task_name}")
         print(f"# Methods to evaluate: {len(methods)}")
-        print(f"# Test instances: {self.evaluator.n_instance if hasattr(self.evaluator, 'n_instance') else 'N/A'}")
+        print(f"# Test instances: {self.n_instance}")
         print(f"{'#'*60}\n")
 
         # Evaluate each method
