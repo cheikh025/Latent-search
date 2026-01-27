@@ -2,21 +2,23 @@
 Gradient-based search in u-space (prior space) using trained ranking predictor and normalizing flow.
 
 Pipeline:
-1. Load trained ranking predictor R(z) and normalizing flow F
-2. Gradient ascent in u-space to find u* = argmax R(F^(-1)(u))
-3. Map u* → z* using flow inverse
+1. Load trained ranking predictor R(u) and normalizing flow F
+2. Gradient ascent in u-space to find u* = argmax [R(u) - λ∥u - u₀∥²]
+3. Map u* → z* using flow inverse F^(-1)(u)
 4. Generate code using mapper + decoder
 5. Evaluate and save successful programs
 
 Advantages over z-space search:
+- Direct optimization in normalized prior space with predictor R(u) trained on u-vectors
 - Flow inverse F^(-1)(u) naturally constrains search to the learned manifold
 - Less risk of drifting to invalid embedding regions
-- No need for trust region penalty (flow provides implicit constraint)
+- Optional trust region penalty λ∥u - u₀∥² for additional control
 
 Uses same models as train_unified_mapper_optimized.py and train_unified_flow.py:
 - Encoder: BAAI/bge-code-v1
 - Decoder: Qwen/Qwen3-4B-Instruct-2507 (with Flash Attention 2)
 - Flow: Unified normalizing flow trained on all tasks
+- Predictor: U-space ranking predictor trained on prior-space vectors
 """
 
 import os
@@ -31,7 +33,7 @@ from sentence_transformers import SentenceTransformer
 
 from mapper import Mapper
 from normalizing_flow import NormalizingFlow
-from ranking_score_predictor_z import (
+from ranking_score_predictor_u import (
     RankingScorePredictor,
     load_ranking_predictor,
     get_encoder_model,
@@ -168,20 +170,22 @@ def gradient_ascent_u(
     init_u: torch.Tensor,
     steps: int = 100,
     lr: float = 0.01,
+    trust_region_lambda: float = 0.0,
     device: str = 'cuda',
     verbose: bool = False
 ) -> torch.Tensor:
     """
     Gradient ascent in u-space (prior space) to maximize predicted ranking score.
 
-    Maximizes: R(F^(-1)(u)) where F^(-1) is the flow inverse mapping u → z
+    Maximizes: R(u) - λ∥u - u₀∥² where R is the u-space trained ranking predictor
 
     Args:
-        predictor: Trained ranking score predictor R(z)
-        flow_model: Trained normalizing flow F
+        predictor: Trained ranking score predictor R(u) (takes u-vectors as input)
+        flow_model: Trained normalizing flow F (used for u → z mapping after optimization)
         init_u: Initial u vectors [num_starts, dim]
         steps: Number of gradient ascent steps
         lr: Learning rate
+        trust_region_lambda: Trust region penalty coefficient (0 = disabled)
         device: Device to use
         verbose: Print progress
 
@@ -192,23 +196,28 @@ def gradient_ascent_u(
     flow_model.eval()
 
     u = init_u.clone().to(device).requires_grad_(True)
+    u_init = init_u.clone().to(device)  # Keep initial u for trust region
     num_samples = u.shape[0]
 
+    trust_msg = f", trust_region_lambda={trust_region_lambda}" if trust_region_lambda > 0 else ""
     if verbose:
-        print(f"Gradient ascent in u-space: {num_samples} starts, {steps} steps, lr={lr}")
+        print(f"Gradient ascent in u-space: {num_samples} starts, {steps} steps, lr={lr}{trust_msg}")
 
     for step in range(steps):
         if u.grad is not None:
             u.grad.zero_()
 
-        # Map u → z using flow inverse
-        z = flow_model.inverse(u)
-
-        # Predict score R(z)
-        scores = predictor(z)
+        # Predict score R(u) directly - predictor was trained on u-space
+        scores = predictor(u)
 
         # Maximize score (negative for gradient ascent)
         loss = -scores.mean()
+
+        # Add trust region penalty if enabled
+        if trust_region_lambda > 0:
+            trust_region_penalty = trust_region_lambda * torch.mean((u - u_init) ** 2)
+            loss = loss + trust_region_penalty
+
         loss.backward()
 
         # Gradient ascent update
@@ -217,7 +226,12 @@ def gradient_ascent_u(
 
         if verbose and (step + 1) % 20 == 0:
             avg_score = -loss.item()
-            print(f"  Step {step+1}/{steps} | Avg score: {avg_score:.4f}")
+            if trust_region_lambda > 0:
+                with torch.no_grad():
+                    distance = torch.mean(torch.sqrt(torch.sum((u - u_init) ** 2, dim=1))).item()
+                print(f"  Step {step+1}/{steps} | Avg score: {avg_score:.4f} | Dist from init: {distance:.4f}")
+            else:
+                print(f"  Step {step+1}/{steps} | Avg score: {avg_score:.4f}")
 
     return u.detach()
 
@@ -228,6 +242,7 @@ def multi_start_gradient_search_u(
     num_starts: int = 10,
     steps: int = 100,
     lr: float = 0.01,
+    trust_region_lambda: float = 0.0,
     init_from_data: torch.Tensor = None,
     device: str = 'cuda',
     verbose: bool = True
@@ -241,6 +256,7 @@ def multi_start_gradient_search_u(
         num_starts: Number of parallel searches
         steps: Gradient steps per search
         lr: Learning rate
+        trust_region_lambda: Trust region penalty coefficient (0 = disabled)
         init_from_data: Tensor of existing z vectors to initialize from (required)
         device: Device to use
         verbose: Print progress
@@ -273,17 +289,18 @@ def multi_start_gradient_search_u(
         init_u=init_u,
         steps=steps,
         lr=lr,
+        trust_region_lambda=trust_region_lambda,
         device=device,
         verbose=verbose
     )
 
-    # Map optimized u → z using flow inverse
+    # Get final scores and sort (predictor takes u as input)
+    with torch.no_grad():
+        final_scores = predictor(optimized_u).squeeze()
+
+    # Map optimized u → z using flow inverse (for decoding)
     with torch.no_grad():
         optimized_z = flow_model.inverse(optimized_u)
-
-    # Get final scores and sort
-    with torch.no_grad():
-        final_scores = predictor(optimized_z).squeeze()
 
     if verbose:
         print(f"\nFinal scores:")
@@ -377,6 +394,7 @@ def gradient_search_pipeline_u(
     num_searches_per_iter: int = 10,
     gradient_steps: int = 100,
     lr: float = 0.01,
+    trust_region_lambda: float = 0.0,
     temperature: float = 0.7,
     decoder_name: str = "Qwen/Qwen3-4B-Instruct-2507",
     device: str = "cuda",
@@ -395,6 +413,7 @@ def gradient_search_pipeline_u(
         num_searches_per_iter: Number of gradient searches per iteration
         gradient_steps: Steps per gradient search
         lr: Learning rate for gradient ascent
+        trust_region_lambda: Trust region penalty coefficient (0 = disabled)
         temperature: Sampling temperature for decoder
         decoder_name: Decoder model name
         device: Device to use
@@ -469,10 +488,11 @@ def gradient_search_pipeline_u(
         )
         init_embeddings = init_embeddings.float()
 
-    # Score with predictor
+    # Score with predictor (map z → u first, since predictor expects u-space input)
     print("Scoring with predictor...")
     with torch.no_grad():
-        init_scores = predictor(init_embeddings).squeeze()
+        init_u, _ = flow_model(init_embeddings)
+        init_scores = predictor(init_u).squeeze()
 
     # Sort by predicted score (descending)
     sorted_indices = torch.argsort(init_scores, descending=True)
@@ -500,6 +520,7 @@ def gradient_search_pipeline_u(
             num_starts=num_searches_per_iter,
             steps=gradient_steps,
             lr=lr,
+            trust_region_lambda=trust_region_lambda,
             init_from_data=init_embeddings,
             device=device,
             verbose=verbose
@@ -669,7 +690,7 @@ def gradient_search_pipeline_u(
 def main():
     parser = argparse.ArgumentParser(description='Gradient search in u-space (prior space)')
     parser.add_argument('--task', type=str, default='tsp_construct', help='Task name')
-    parser.add_argument('--predictor', type=str, default='ranking_predictor_z.pth', help='Path to ranking predictor')
+    parser.add_argument('--predictor', type=str, default='ranking_predictor_u.pth', help='Path to u-space ranking predictor')
     parser.add_argument('--flow', type=str, default='Flow_Checkpoints/unified_flow_final.pth', help='Path to normalizing flow')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
     parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='Decoder model')
@@ -677,6 +698,7 @@ def main():
     parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration')
     parser.add_argument('--gradient_steps', type=int, default=100, help='Gradient steps per search')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
+    parser.add_argument('--trust_region_lambda', type=float, default=0.0, help='Trust region penalty coefficient (0 = disabled)')
     parser.add_argument('--temperature', type=float, default=0.7, help='Decoder temperature')
     parser.add_argument('--output_dir', type=str, default='gradient_search_u_results', help='Output directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
@@ -692,6 +714,7 @@ def main():
         num_searches_per_iter=args.num_searches,
         gradient_steps=args.gradient_steps,
         lr=args.lr,
+        trust_region_lambda=args.trust_region_lambda,
         temperature=args.temperature,
         decoder_name=args.decoder,
         device=args.device,
