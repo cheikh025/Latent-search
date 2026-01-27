@@ -85,8 +85,8 @@ def add_seeds_to_population(method, seeds):
 
 def add_seeds_to_funsearch(method, seeds):
     """
-    Helper function to add seed heuristics to FunSearch's programs database.
-    FunSearch uses a different structure (programs_database instead of population).
+    Helper function to add seed heuristics to FunSearch's database.
+    FunSearch stores the database as _database (not _programs_database).
     """
     for name, code in seeds.items():
         score, eval_time = method._evaluator.evaluate_program_record_time(code)
@@ -102,7 +102,8 @@ def add_seeds_to_funsearch(method, seeds):
 
         # FunSearch's register_function takes score as a separate parameter
         # island_id=None means add to all islands (for initialization)
-        method._programs_database.register_function(
+        # IMPORTANT: The attribute is _database (NOT _programs_database)
+        method._database.register_function(
             function=func,
             island_id=None,  # Add to all islands
             score=score
