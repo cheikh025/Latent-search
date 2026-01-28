@@ -17,6 +17,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 
@@ -396,6 +397,94 @@ def generate_code_from_z(
         return clean_code, raw_output
 
 
+def generate_code_from_z_batch(
+    z_vectors: torch.Tensor,
+    mapper_model,
+    decoder_model,
+    decoder_tokenizer,
+    skeleton_prompt: str,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    max_new_tokens: int = 1024
+) -> list:
+    """
+    Generate code from multiple latent vectors in a single batch.
+
+    Args:
+        z_vectors: Tensor of shape [batch_size, dim]
+        mapper_model: Trained mapper
+        decoder_model: Decoder LLM
+        decoder_tokenizer: Tokenizer
+        skeleton_prompt: Task instruction prompt
+        temperature: Sampling temperature
+        top_p: Nucleus sampling parameter
+        max_new_tokens: Maximum tokens to generate
+
+    Returns:
+        List of (clean_code, raw_output) tuples
+    """
+    embed_layer = decoder_model.get_input_embeddings()
+    device = embed_layer.weight.device
+    dtype = embed_layer.weight.dtype
+
+    # Ensure correct shape
+    if isinstance(z_vectors, np.ndarray):
+        z_vectors = torch.from_numpy(z_vectors)
+
+    if z_vectors.dim() == 1:
+        z_vectors = z_vectors.unsqueeze(0)
+
+    batch_size = z_vectors.shape[0]
+    z_vectors = z_vectors.to(device).float()
+
+    with torch.no_grad():
+        # Batch map z -> soft prompts: [batch_size, num_tokens, hidden_dim]
+        soft_prompt_embeds = mapper_model(z_vectors).to(device, dtype=dtype)
+
+        # Prepare instruction (same for all samples)
+        instruction_messages = [{"role": "user", "content": skeleton_prompt}]
+        instruction_ids = decoder_tokenizer.apply_chat_template(
+            instruction_messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(device)
+
+        # Get instruction embeddings and repeat for batch
+        instruction_embeds = embed_layer(instruction_ids)  # [1, seq_len, hidden]
+        instruction_embeds = instruction_embeds.expand(batch_size, -1, -1)  # [batch, seq_len, hidden]
+
+        # Concatenate: [batch, num_soft_tokens + seq_len, hidden]
+        inputs_embeds = torch.cat([soft_prompt_embeds, instruction_embeds], dim=1)
+
+        # Create attention mask (all 1s since no padding in inputs)
+        attention_mask = torch.ones(
+            batch_size, inputs_embeds.shape[1],
+            dtype=torch.long, device=device
+        )
+
+        # Batched generation
+        generated_ids = decoder_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=True,
+            pad_token_id=decoder_tokenizer.pad_token_id,
+            eos_token_id=decoder_tokenizer.eos_token_id
+        )
+
+        # Decode all outputs
+        results = []
+        for i in range(batch_size):
+            raw_output = decoder_tokenizer.decode(generated_ids[i], skip_special_tokens=True)
+            clean_code = extract_python_code_robust(raw_output, include_preface=True)
+            results.append((clean_code, raw_output))
+
+        return results
+
+
 # ============================================================================
 # Main Search Pipeline
 # ============================================================================
@@ -407,6 +496,7 @@ def gradient_search_pipeline_u(
     mapper_path: str,
     num_iterations: int = 5,
     num_searches_per_iter: int = 10,
+    top_k_pool_size: int = 30,
     gradient_steps: int = 100,
     lr: float = 0.01,
     trust_region_lambda: float = 0.0,
@@ -414,18 +504,32 @@ def gradient_search_pipeline_u(
     decoder_name: str = "Qwen/Qwen3-4B-Instruct-2507",
     device: str = "cuda",
     output_dir: str = "gradient_search_u_results",
+    num_evaluators: int = 4,
+    generation_batch_size: int = 4,
     verbose: bool = True
 ):
     """
-    Full gradient search pipeline in u-space (prior space).
+    Full gradient search pipeline in u-space (prior space) with task-conditional flow.
+
+    Key Features:
+    1. Evaluates ALL baseline heuristics on ACTUAL test instances (not predicted scores)
+    2. Maintains database of all programs (baselines + discoveries) with actual scores
+    3. Each iteration: sorts database by actual score, samples from top-k pool using softmax probabilities
+    4. Guarantees starting from PROVEN best programs, not predicted best
+    5. Softmax-weighted sampling: better programs have higher selection probability, but exploration is maintained
+    6. No repetition in sampling (samples without replacement)
+    7. Batched code generation for efficiency
+    8. Parallel evaluation using ThreadPoolExecutor
+    9. Task-conditional flow for task-specific prior space
 
     Args:
         task_name: Task to search for (e.g., 'tsp_construct')
         predictor_path: Path to trained ranking predictor
-        flow_path: Path to trained normalizing flow
+        flow_path: Path to trained conditional normalizing flow
         mapper_path: Path to trained mapper
         num_iterations: Number of search iterations
-        num_searches_per_iter: Number of gradient searches per iteration
+        num_searches_per_iter: Number of gradient searches per iteration (how many to sample)
+        top_k_pool_size: Pool size to sample seeds from (e.g., 30 means sample from best 30 programs)
         gradient_steps: Steps per gradient search
         lr: Learning rate for gradient ascent
         trust_region_lambda: Trust region penalty coefficient (0 = disabled)
@@ -433,18 +537,22 @@ def gradient_search_pipeline_u(
         decoder_name: Decoder model name
         device: Device to use
         output_dir: Directory to save results
+        num_evaluators: Number of parallel evaluation workers (default: 4)
+        generation_batch_size: Batch size for code generation (default: 4, adjust based on GPU memory)
         verbose: Print progress
     """
 
     os.makedirs(output_dir, exist_ok=True)
 
     print("="*70)
-    print("Gradient Search in U-Space (Prior Space)")
+    print("Gradient Search in U-Space (Prior Space) - Conditional Flow")
     print("="*70)
     print(f"Task: {task_name}")
     print(f"Predictor: {predictor_path}")
-    print(f"Flow: {flow_path}")
+    print(f"Flow: {flow_path} (conditional)")
     print(f"Mapper: {mapper_path}")
+    print(f"Parallel evaluators: {num_evaluators}")
+    print(f"Generation batch size: {generation_batch_size}")
     print()
 
     # ===== Load Models =====
@@ -485,40 +593,85 @@ def gradient_search_pipeline_u(
     if skeleton_prompt is None:
         raise ValueError(f"No prompt defined for task: {task_name}")
 
-    # ===== Load Initial Data =====
+    # ===== Load and Evaluate Initial Baselines =====
 
-    print(f"\nLoading heuristics from task/{task_name}/heuristics.json...")
+    print(f"\nLoading baseline heuristics from task/{task_name}/heuristics.json...")
     heuristics = load_heuristics(task_name)
-    codes = list(heuristics.values())
+    baseline_codes = list(heuristics.values())
 
-    if len(codes) == 0:
+    if len(baseline_codes) == 0:
         raise ValueError(f"No heuristics found in task/{task_name}/heuristics.json")
 
-    print(f"  Loaded {len(codes)} heuristics")
+    print(f"  Loaded {len(baseline_codes)} baseline heuristics")
 
-    # Encode existing heuristics
-    print("Encoding heuristics...")
-    with torch.no_grad():
-        init_embeddings = encoder_model.encode(
-            codes,
-            convert_to_tensor=True,
-            device=device,
-            show_progress_bar=True
-        )
-        init_embeddings = init_embeddings.float()
+    # Initialize program database: {code_hash: {'code', 'actual_score', 'embedding', 'source'}}
+    program_database = {}
 
-    # Score with predictor (map z → u first, since predictor expects u-space input)
-    print("Scoring with predictor...")
-    with torch.no_grad():
-        init_u, _ = flow_model(init_embeddings)
-        init_scores = predictor(init_u).squeeze()
+    # Evaluate ALL baselines to get ACTUAL scores (not predicted!) - PARALLEL
+    print(f"\nEvaluating baseline heuristics on actual test instances (parallel, {num_evaluators} workers)...")
+    print("(This may take a few minutes but only runs once)")
 
-    # Sort by predicted score (descending)
-    sorted_indices = torch.argsort(init_scores, descending=True)
-    init_embeddings = init_embeddings[sorted_indices]
+    def eval_baseline(idx_code):
+        """Evaluate a single baseline heuristic."""
+        idx, code = idx_code
+        try:
+            score = secure_eval.evaluate_program(code)
+            return idx, code, score, None
+        except Exception as e:
+            return idx, code, None, str(e)
 
-    print(f"  Top predicted score: {init_scores.max().item():.4f}")
-    print(f"  Bottom predicted score: {init_scores.min().item():.4f}")
+    # Submit all baseline evaluations in parallel
+    baseline_results = []
+    with ThreadPoolExecutor(max_workers=num_evaluators) as executor:
+        futures = {executor.submit(eval_baseline, (idx, code)): idx
+                   for idx, code in enumerate(baseline_codes)}
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating baselines"):
+            baseline_results.append(future.result())
+
+    # Process results and encode (encoding stays sequential - GPU bound)
+    valid_baselines = [(idx, code, score) for idx, code, score, error in baseline_results
+                       if score is not None and np.isfinite(score)]
+
+    print(f"  Valid baselines: {len(valid_baselines)}/{len(baseline_codes)}")
+    print("  Encoding valid baselines...")
+
+    for idx, code, score in tqdm(valid_baselines, desc="Encoding baselines"):
+        try:
+            # Encode
+            with torch.no_grad():
+                z_embedding = encoder_model.encode(
+                    [code],
+                    convert_to_tensor=True,
+                    device=device,
+                    show_progress_bar=False
+                )[0].float()
+
+            # Add to database
+            code_hash = hash(code.strip())
+            program_database[code_hash] = {
+                'code': code,
+                'actual_score': float(score),
+                'embedding': z_embedding,
+                'source': 'baseline',
+                'iteration': -1
+            }
+
+        except Exception as e:
+            if verbose:
+                print(f"  Baseline {idx+1}: Encoding error - {e}")
+            continue
+
+    if len(program_database) == 0:
+        raise ValueError("No valid baseline programs after evaluation!")
+
+    print(f"\n✓ Successfully evaluated {len(program_database)} baseline programs")
+
+    # Sort by actual score to show statistics (DESCENDING - higher is better!)
+    sorted_baselines = sorted(program_database.values(), key=lambda x: x['actual_score'], reverse=True)
+    print(f"  Best baseline score: {sorted_baselines[0]['actual_score']:.4f}")
+    print(f"  Worst baseline score: {sorted_baselines[-1]['actual_score']:.4f}")
+    print(f"  Mean baseline score: {np.mean([p['actual_score'] for p in program_database.values()]):.4f}")
 
     # ===== Run Search =====
 
@@ -530,13 +683,57 @@ def gradient_search_pipeline_u(
         print(f"Iteration {iteration + 1}/{num_iterations}")
         print(f"{'='*70}")
 
-        # Gradient search in u-space
-        print(f"\nRunning gradient search in u-space ({num_searches_per_iter} starts, {gradient_steps} steps)...")
+        # Sort ALL programs (baselines + discoveries) by ACTUAL score
+        # Higher score is better (evaluators return negative costs)
+        sorted_programs = sorted(
+            program_database.values(),
+            key=lambda x: x['actual_score'],
+            reverse=True  # DESCENDING - higher (less negative) is better
+        )
+
+        # Create top-k pool and sample seeds based on softmax probabilities
+        # This adds stochasticity to avoid getting stuck in same neighborhoods
+        # while favoring better programs (higher scores have higher selection probability)
+        pool_size = min(top_k_pool_size, len(sorted_programs))
+        top_k_pool = sorted_programs[:pool_size]
+
+        num_seeds = min(num_searches_per_iter, pool_size)
+
+        # Compute softmax probabilities based on scores
+        # Higher score (less negative) = higher probability
+        pool_scores = np.array([p['actual_score'] for p in top_k_pool])
+
+        # Apply softmax: exp(score) / sum(exp(score))
+        # Use temperature=1.0 for standard softmax (can be tuned for more/less exploration)
+        exp_scores = np.exp(pool_scores - np.max(pool_scores))  # Subtract max for numerical stability
+        probabilities = exp_scores / np.sum(exp_scores)
+
+        # Sample from top-k pool using softmax probabilities (no replacement)
+        sampled_indices = np.random.choice(pool_size, num_seeds, replace=False, p=probabilities)
+        top_k_programs = [top_k_pool[i] for i in sampled_indices]
+
+        # Extract embeddings from sampled programs
+        init_embeddings = torch.stack([p['embedding'] for p in top_k_programs])
+
+        # Get score range and probabilities for logging
+        sampled_scores = [top_k_programs[i]['actual_score'] for i in range(num_seeds)]
+        sampled_probs = [probabilities[i] for i in sampled_indices]
+        best_sampled = max(sampled_scores)
+        worst_sampled = min(sampled_scores)
+
+        print(f"\nStarting gradient search by sampling {num_seeds} from top-{pool_size} programs (softmax-weighted):")
+        print(f"  Best score in database: {sorted_programs[0]['actual_score']:.4f} ({sorted_programs[0]['source']})")
+        print(f"  Best in sampled seeds: {best_sampled:.4f} (P={max(sampled_probs):.3f})")
+        print(f"  Worst in sampled seeds: {worst_sampled:.4f} (P={min(sampled_probs):.3f})")
+        print(f"  Database size: {len(program_database)} programs")
+
+        # Gradient search in u-space from top-k seeds
+        print(f"\nRunning gradient search in u-space ({num_seeds} starts, {gradient_steps} steps)...")
 
         optimized_z = multi_start_gradient_search_u(
             predictor=predictor,
             flow_model=flow_model,
-            num_starts=num_searches_per_iter,
+            num_starts=num_seeds,
             steps=gradient_steps,
             lr=lr,
             trust_region_lambda=trust_region_lambda,
@@ -545,117 +742,138 @@ def gradient_search_pipeline_u(
             verbose=verbose
         )
 
-        # Generate and evaluate
-        print(f"\nGenerating and evaluating {len(optimized_z)} candidates...")
+        # ===== BATCHED GENERATION =====
+        print(f"\nGenerating {len(optimized_z)} candidates in batches (batch_size={generation_batch_size})...")
 
-        successful = 0
-        failed = 0
+        all_generated = []
+        for batch_start in range(0, len(optimized_z), generation_batch_size):
+            batch_end = min(batch_start + generation_batch_size, len(optimized_z))
+            z_batch = optimized_z[batch_start:batch_end]
 
-        for idx, z in enumerate(optimized_z):
+            batch_results = generate_code_from_z_batch(
+                z_batch,
+                mapper_model,
+                decoder_model,
+                decoder_tokenizer,
+                skeleton_prompt,
+                temperature=temperature
+            )
+            all_generated.extend(batch_results)
+
             if verbose:
-                print(f"\n--- Candidate {idx+1}/{len(optimized_z)} ---")
+                print(f"  Generated batch {batch_start//generation_batch_size + 1}/{(len(optimized_z) + generation_batch_size - 1)//generation_batch_size}")
 
+        # ===== VALIDATE AND FILTER =====
+        print(f"Validating {len(all_generated)} generated programs...")
+
+        valid_candidates = []
+        existing_hashes = set(hash(c.strip()) for c in successful_programs.values())
+
+        for idx, (clean_code, raw_output) in enumerate(all_generated):
+            # Validate syntax
+            if not clean_code or not is_valid_python(clean_code):
+                continue
+
+            # Parse function
+            program = TextFunctionProgramConverter.text_to_program(clean_code)
+            if program is None or len(program.functions) == 0:
+                continue
+
+            func_name = program.functions[0].name
+
+            # Check for duplicates
+            code_hash = hash(clean_code.strip())
+            if code_hash in existing_hashes:
+                continue
+
+            existing_hashes.add(code_hash)
+            valid_candidates.append((idx, clean_code, func_name))
+
+        print(f"  Valid candidates: {len(valid_candidates)}/{len(all_generated)}")
+
+        # ===== PARALLEL EVALUATION =====
+        print(f"Evaluating {len(valid_candidates)} candidates in parallel ({num_evaluators} workers)...")
+
+        def eval_candidate(item):
+            """Evaluate a single candidate."""
+            idx, clean_code, func_name = item
             try:
-                # Generate code
-                clean_code, raw_output = generate_code_from_z(
-                    z.cpu().numpy(),
-                    mapper_model,
-                    decoder_model,
-                    decoder_tokenizer,
-                    skeleton_prompt,
-                    temperature=temperature
-                )
-
-                # Validate
-                if not clean_code or not is_valid_python(clean_code):
-                    if verbose:
-                        print("  Invalid Python syntax")
-                    failed += 1
-                    continue
-
-                # Parse function
-                program = TextFunctionProgramConverter.text_to_program(clean_code)
-                if program is None or len(program.functions) == 0:
-                    if verbose:
-                        print("  Could not parse function")
-                    failed += 1
-                    continue
-
-                func_name = program.functions[0].name
-
-                # Check for duplicates
-                code_hash = hash(clean_code.strip())
-                if code_hash in [hash(c.strip()) for c in successful_programs.values()]:
-                    if verbose:
-                        print("  Duplicate program")
-                    failed += 1
-                    continue
-
-                # Evaluate
-                try:
-                    score = secure_eval.evaluate_program(clean_code)
-
-                    if score is None or not np.isfinite(score):
-                        if verbose:
-                            print(f"  Invalid score: {score}")
-                        failed += 1
-                        continue
-
-                except Exception as e:
-                    if verbose:
-                        print(f"  Evaluation error: {e}")
-                    failed += 1
-                    continue
-
-                # Success!
-                program_id = f"iter{iteration}_idx{idx}"
-                successful_programs[program_id] = clean_code
-
-                all_results.append({
-                    'program_id': program_id,
-                    'iteration': iteration,
-                    'score': score,
-                    'code': clean_code,
-                    'function_name': func_name
-                })
-
-                successful += 1
-
-                if verbose:
-                    print(f"  ✓ Score: {score:.4f} | Function: {func_name}")
-
+                score = secure_eval.evaluate_program(clean_code)
+                return idx, clean_code, func_name, score, None
             except Exception as e:
-                if verbose:
-                    print(f"  Error: {e}")
+                return idx, clean_code, func_name, None, str(e)
+
+        eval_results = []
+        with ThreadPoolExecutor(max_workers=num_evaluators) as executor:
+            futures = {executor.submit(eval_candidate, item): item[0]
+                       for item in valid_candidates}
+
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating candidates"):
+                eval_results.append(future.result())
+
+        # ===== PROCESS RESULTS =====
+        successful = 0
+        failed = len(all_generated) - len(valid_candidates)  # Already failed validation
+
+        for idx, clean_code, func_name, score, error in eval_results:
+            if score is None or not np.isfinite(score):
                 failed += 1
                 continue
+
+            # Success! Add to database with ACTUAL score
+            program_id = f"iter{iteration}_idx{idx}"
+            successful_programs[program_id] = clean_code
+
+            # Add to program database
+            code_hash_new = hash(clean_code.strip())
+            if code_hash_new not in program_database:
+                # Encode the new program
+                with torch.no_grad():
+                    z_new = encoder_model.encode(
+                        [clean_code],
+                        convert_to_tensor=True,
+                        device=device,
+                        show_progress_bar=False
+                    )[0].float()
+
+                program_database[code_hash_new] = {
+                    'code': clean_code,
+                    'actual_score': float(score),
+                    'embedding': z_new,
+                    'source': 'discovered',
+                    'iteration': iteration
+                }
+
+            all_results.append({
+                'program_id': program_id,
+                'iteration': iteration,
+                'score': score,
+                'code': clean_code,
+                'function_name': func_name
+            })
+
+            successful += 1
+
+            if verbose:
+                print(f"  ✓ Score: {score:.4f} | Function: {func_name}")
 
         # Iteration summary
         print(f"\nIteration {iteration + 1} Summary:")
         print(f"  Successful: {successful}")
         print(f"  Failed: {failed}")
-        print(f"  Total discovered: {len(successful_programs)}")
+        print(f"  Total programs in database: {len(program_database)}")
+        print(f"  Total discovered (all iterations): {len(successful_programs)}")
 
         if all_results:
             scores = [r['score'] for r in all_results]
-            print(f"  Best score so far: {max(scores):.4f}")
-            print(f"  Avg score: {np.mean(scores):.4f}")
+            print(f"  Best score so far: {max(scores):.4f}")  # max - higher is better!
+            print(f"  Avg score (discoveries): {np.mean(scores):.4f}")
 
-        # Update init_embeddings with successful programs
-        if successful > 0:
-            new_codes = [r['code'] for r in all_results[-successful:]]
-            with torch.no_grad():
-                new_embeddings = encoder_model.encode(
-                    new_codes,
-                    convert_to_tensor=True,
-                    device=device,
-                    show_progress_bar=False
-                ).float()
-
-            if init_embeddings is not None:
-                init_embeddings = torch.cat([new_embeddings, init_embeddings], dim=0)
-            else:
-                init_embeddings = new_embeddings
+        # Database statistics
+        db_scores = [p['actual_score'] for p in program_database.values()]
+        print(f"  Best score in database: {max(db_scores):.4f}")  # max - higher is better!
+        print(f"  Database programs: {sum(1 for p in program_database.values() if p['source']=='baseline')} baselines, "
+              f"{sum(1 for p in program_database.values() if p['source']=='discovered')} discovered")
 
     # ===== Final Results =====
 
@@ -663,19 +881,33 @@ def gradient_search_pipeline_u(
     print("FINAL RESULTS")
     print(f"{'='*70}")
 
-    print(f"\nTotal programs discovered: {len(successful_programs)}")
+    print(f"\nTotal programs in database: {len(program_database)}")
+    print(f"  Baselines: {sum(1 for p in program_database.values() if p['source']=='baseline')}")
+    print(f"  Discovered: {sum(1 for p in program_database.values() if p['source']=='discovered')}")
+
+    # Get all database scores
+    db_programs = list(program_database.values())
+    db_programs.sort(key=lambda x: x['actual_score'], reverse=True)  # DESCENDING - higher is better
+
+    print(f"\nDatabase Statistics (ACTUAL scores):")
+    print(f"  Best score: {db_programs[0]['actual_score']:.4f} ({db_programs[0]['source']}, iter {db_programs[0]['iteration']})")
+    print(f"  Worst score: {db_programs[-1]['actual_score']:.4f}")
+    print(f"  Mean score: {np.mean([p['actual_score'] for p in db_programs]):.4f}")
+    print(f"  Std score: {np.std([p['actual_score'] for p in db_programs]):.4f}")
 
     if all_results:
-        # Sort by score
+        # Sort discovered programs by score (DESCENDING - higher is better)
         all_results.sort(key=lambda x: x['score'], reverse=True)
 
         scores = [r['score'] for r in all_results]
-        print(f"Best score: {max(scores):.4f}")
-        print(f"Avg score: {np.mean(scores):.4f}")
-        print(f"Std score: {np.std(scores):.4f}")
+        print(f"\nDiscovered Programs Only:")
+        print(f"  Count: {len(all_results)}")
+        print(f"  Best score: {max(scores):.4f}")
+        print(f"  Avg score: {np.mean(scores):.4f}")
+        print(f"  Std score: {np.std(scores):.4f}")
 
-        # Show top 5
-        print(f"\nTop 5 Programs:")
+        # Show top 5 discovered programs
+        print(f"\nTop 5 Discovered Programs:")
         print("-"*70)
         for i, result in enumerate(all_results[:5]):
             print(f"\n{i+1}. Score: {result['score']:.4f} | {result['function_name']}")
@@ -683,17 +915,48 @@ def gradient_search_pipeline_u(
             code_preview = result['code'][:200].replace('\n', '\n   ')
             print(f"   {code_preview}...")
 
+    # Show top 5 from entire database (baselines + discoveries)
+    print(f"\nTop 5 Programs Overall (Baselines + Discoveries):")
+    print("-"*70)
+    for i, prog in enumerate(db_programs[:5]):
+        print(f"\n{i+1}. Score: {prog['actual_score']:.4f} | Source: {prog['source']} | Iter: {prog['iteration']}")
+        code_preview = prog['code'][:200].replace('\n', '\n   ')
+        print(f"   {code_preview}...")
+
     # ===== Save Results =====
 
-    programs_path = os.path.join(output_dir, f"{task_name}_gradient_searched_u.json")
+    # Save discovered programs only
+    programs_path = os.path.join(output_dir, f"{task_name}_gradient_searched_u_conditional.json")
     with open(programs_path, 'w') as f:
         json.dump(successful_programs, f, indent=2)
-    print(f"\nSaved {len(successful_programs)} programs to {programs_path}")
+    print(f"\nSaved {len(successful_programs)} discovered programs to {programs_path}")
 
-    results_path = os.path.join(output_dir, f"{task_name}_search_results_u.json")
+    # Save detailed results for discoveries
+    results_path = os.path.join(output_dir, f"{task_name}_search_results_u_conditional.json")
     with open(results_path, 'w') as f:
         json.dump(all_results, f, indent=2)
-    print(f"Saved detailed results to {results_path}")
+    print(f"Saved detailed discovery results to {results_path}")
+
+    # Save entire database (baselines + discoveries) with actual scores
+    database_export = {}
+    for code_hash, prog_data in program_database.items():
+        # Create unique name
+        if prog_data['source'] == 'baseline':
+            name = f"baseline_{code_hash}"
+        else:
+            name = f"discovered_iter{prog_data['iteration']}_{code_hash}"
+
+        database_export[name] = {
+            'code': prog_data['code'],
+            'actual_score': prog_data['actual_score'],
+            'source': prog_data['source'],
+            'iteration': prog_data['iteration']
+        }
+
+    database_path = os.path.join(output_dir, f"{task_name}_full_database_u_conditional.json")
+    with open(database_path, 'w') as f:
+        json.dump(database_export, f, indent=2)
+    print(f"Saved full database ({len(database_export)} programs) to {database_path}")
 
     # Clean up
     del encoder_model
@@ -714,13 +977,16 @@ def main():
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
     parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='Decoder model')
     parser.add_argument('--num_iterations', type=int, default=5, help='Number of search iterations')
-    parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration')
+    parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration (how many seeds to sample)')
+    parser.add_argument('--top_k_pool', type=int, default=30, help='Pool size for softmax-weighted sampling (e.g., 30 = sample from top 30 programs using softmax probabilities)')
     parser.add_argument('--gradient_steps', type=int, default=100, help='Gradient steps per search')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--trust_region_lambda', type=float, default=0.0, help='Trust region penalty coefficient (0 = disabled)')
     parser.add_argument('--temperature', type=float, default=0.7, help='Decoder temperature')
-    parser.add_argument('--output_dir', type=str, default='gradient_search_u_results', help='Output directory')
+    parser.add_argument('--output_dir', type=str, default='gradient_search_u_conditional_results', help='Output directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
+    parser.add_argument('--num_evaluators', type=int, default=4, help='Number of parallel evaluation workers')
+    parser.add_argument('--generation_batch_size', type=int, default=4, help='Batch size for code generation (adjust based on GPU memory)')
 
     args = parser.parse_args()
 
@@ -731,6 +997,7 @@ def main():
         mapper_path=args.mapper,
         num_iterations=args.num_iterations,
         num_searches_per_iter=args.num_searches,
+        top_k_pool_size=args.top_k_pool,
         gradient_steps=args.gradient_steps,
         lr=args.lr,
         trust_region_lambda=args.trust_region_lambda,
@@ -738,6 +1005,8 @@ def main():
         decoder_name=args.decoder,
         device=args.device,
         output_dir=args.output_dir,
+        num_evaluators=args.num_evaluators,
+        generation_batch_size=args.generation_batch_size,
         verbose=True
     )
 
