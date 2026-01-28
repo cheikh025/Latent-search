@@ -35,6 +35,7 @@ from tqdm import tqdm
 
 from mapper import Mapper
 from utils import is_valid_python
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
 
 
 # ============================================================================
@@ -494,8 +495,18 @@ def train_unified_mapper_optimized(
 # Main Training Script
 # ============================================================================
 
-def main(resume_checkpoint: Optional[str] = None):
-    """Main training pipeline with optimizations."""
+def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, decoder_name: str = None):
+    """Main training pipeline with optimizations.
+
+    Args:
+        resume_checkpoint: Path to checkpoint file to resume training from.
+        encoder_name: Encoder model name. Defaults to DEFAULT_ENCODER from model_config.py
+        decoder_name: Decoder model name. Defaults to DEFAULT_DECODER from model_config.py
+    """
+    if encoder_name is None:
+        encoder_name = DEFAULT_ENCODER
+    if decoder_name is None:
+        decoder_name = DEFAULT_DECODER
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nUsing device: {device}")
@@ -525,13 +536,13 @@ def main(resume_checkpoint: Optional[str] = None):
     print(f"{'='*70}\n")
 
     encoder_model = SentenceTransformer(
-        "BAAI/bge-code-v1",
+        encoder_name,
         trust_remote_code=True,
         model_kwargs={"dtype": torch.float16},
     ).to(device)
 
     encoder_model.eval()
-    print("Encoder loaded (BAAI/bge-code-v1)\n")
+    print(f"Encoder loaded ({encoder_name})\n")
 
     # ========================================================================
     # Step 3: Encode All Heuristics
@@ -553,11 +564,11 @@ def main(resume_checkpoint: Optional[str] = None):
     # ========================================================================
 
     print(f"{'='*70}")
-    print("Loading Decoder Model (Qwen3-4B-Instruct-2507)")
+    print(f"Loading Decoder Model ({decoder_name})")
     print(f"{'='*70}\n")
 
     decoder_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-4B-Instruct-2507",
+        decoder_name,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         attn_implementation="flash_attention_2",  # 2-3x attention speedup
@@ -568,7 +579,7 @@ def main(resume_checkpoint: Optional[str] = None):
     decoder_model.gradient_checkpointing_enable()
 
     decoder_tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen3-4B-Instruct-2507",
+        decoder_name,
         trust_remote_code=True
     )
 
@@ -684,7 +695,8 @@ def main(resume_checkpoint: Optional[str] = None):
         'total_programs': len(unified_df),
         'programs_per_task': task_counts,
         'epoch': 30,
-        'decoder_model': 'Qwen/Qwen3-4B-Instruct-2507',
+        'encoder_model': encoder_name,
+        'decoder_model': decoder_name,
         'optimizations': {
             'flash_attention_2': True,
             'gradient_checkpointing': True,
@@ -714,7 +726,8 @@ def main(resume_checkpoint: Optional[str] = None):
         'output_dim': output_dim,
         'num_tokens': num_tokens,
         'tasks_trained': list(TASK_PROMPTS.keys()),
-        'decoder_model': 'Qwen/Qwen3-4B-Instruct-2507',
+        'encoder_model': encoder_name,
+        'decoder_model': decoder_name,
     }
     weights_only_path = os.path.join(checkpoint_dir, "unified_mapper_weights_only.pth")
     torch.save(weights_only_data, weights_only_path)
@@ -728,7 +741,8 @@ def main(resume_checkpoint: Optional[str] = None):
     print(f"  Total programs: {len(unified_df)}")
     print(f"  Tasks trained: {len(set(unified_df['task']))}")
     print(f"  Model parameters: {num_params:,}")
-    print(f"  Decoder: Qwen3-4B-Instruct-2507")
+    print(f"  Encoder: {encoder_name}")
+    print(f"  Decoder: {decoder_name}")
     print(f"  Optimizations: Flash Attention 2, Gradient Checkpointing, torch.compile(default)")
     print(f"  Batch: 8 x 2 accumulation = 16 effective")
     print(f"  Full checkpoint (for resume): {final_path}")
@@ -746,6 +760,18 @@ if __name__ == "__main__":
         default=None,
         help="Path to checkpoint file to resume training from"
     )
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        default=DEFAULT_ENCODER,
+        help=f"Encoder model name (default: {DEFAULT_ENCODER})"
+    )
+    parser.add_argument(
+        "--decoder",
+        type=str,
+        default=DEFAULT_DECODER,
+        help=f"Decoder model name (default: {DEFAULT_DECODER})"
+    )
     args = parser.parse_args()
 
-    main(resume_checkpoint=args.resume)
+    main(resume_checkpoint=args.resume, encoder_name=args.encoder, decoder_name=args.decoder)

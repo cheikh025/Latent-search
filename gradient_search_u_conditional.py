@@ -24,6 +24,7 @@ from sentence_transformers import SentenceTransformer
 from mapper import Mapper
 from normalizing_flow import NormalizingFlow
 from train_conditional_flow import TaskConditionalPrior
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
 from ranking_score_predictor_u_conditional import (
     RankingScorePredictor,
     load_ranking_predictor,
@@ -58,8 +59,15 @@ TASK_PROMPTS = {
 # Model Loading
 # ============================================================================
 
-def load_decoder(model_name: str = "Qwen/Qwen3-4B-Instruct-2507", device: str = "cuda"):
-    """Load decoder model and tokenizer."""
+def load_decoder(model_name: str = None, device: str = "cuda"):
+    """Load decoder model and tokenizer.
+
+    Args:
+        model_name: Decoder model name. Defaults to DEFAULT_DECODER from model_config.py
+        device: Device to use.
+    """
+    if model_name is None:
+        model_name = DEFAULT_DECODER
     print(f"Loading decoder: {model_name}...")
 
     decoder_model = AutoModelForCausalLM.from_pretrained(
@@ -501,7 +509,8 @@ def gradient_search_pipeline_u(
     lr: float = 0.01,
     trust_region_lambda: float = 0.0,
     temperature: float = 0.7,
-    decoder_name: str = "Qwen/Qwen3-4B-Instruct-2507",
+    encoder_name: str = None,
+    decoder_name: str = None,
     device: str = "cuda",
     output_dir: str = "gradient_search_u_results",
     num_evaluators: int = 4,
@@ -534,13 +543,20 @@ def gradient_search_pipeline_u(
         lr: Learning rate for gradient ascent
         trust_region_lambda: Trust region penalty coefficient (0 = disabled)
         temperature: Sampling temperature for decoder
-        decoder_name: Decoder model name
+        encoder_name: Encoder model name. Defaults to DEFAULT_ENCODER from model_config.py
+        decoder_name: Decoder model name. Defaults to DEFAULT_DECODER from model_config.py
         device: Device to use
         output_dir: Directory to save results
         num_evaluators: Number of parallel evaluation workers (default: 4)
         generation_batch_size: Batch size for code generation (default: 4, adjust based on GPU memory)
         verbose: Print progress
     """
+
+    # Set defaults from config
+    if encoder_name is None:
+        encoder_name = DEFAULT_ENCODER
+    if decoder_name is None:
+        decoder_name = DEFAULT_DECODER
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -551,6 +567,8 @@ def gradient_search_pipeline_u(
     print(f"Predictor: {predictor_path}")
     print(f"Flow: {flow_path} (conditional)")
     print(f"Mapper: {mapper_path}")
+    print(f"Encoder: {encoder_name}")
+    print(f"Decoder: {decoder_name}")
     print(f"Parallel evaluators: {num_evaluators}")
     print(f"Generation batch size: {generation_batch_size}")
     print()
@@ -579,8 +597,8 @@ def gradient_search_pipeline_u(
     mapper_model = mapper_model.to(embed_layer.weight.device)
 
     # Load encoder ONCE
-    print("Loading encoder (BAAI/bge-code-v1)...")
-    encoder_model = get_encoder_model(device)
+    print(f"Loading encoder ({encoder_name})...")
+    encoder_model = get_encoder_model(device, encoder_name)
     encoder_model.eval()
 
     # Load evaluator
@@ -975,7 +993,8 @@ def main():
     parser.add_argument('--predictor', type=str, default='Predictor_Checkpoints/ranking_predictor_u_conditional_tsp_construct.pth', help='Path to conditional u-space ranking predictor')
     parser.add_argument('--flow', type=str, default='Flow_Checkpoints/conditional_flow_final.pth', help='Path to conditional normalizing flow')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
-    parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='Decoder model')
+    parser.add_argument('--encoder', type=str, default=DEFAULT_ENCODER, help=f'Encoder model (default: {DEFAULT_ENCODER})')
+    parser.add_argument('--decoder', type=str, default=DEFAULT_DECODER, help=f'Decoder model (default: {DEFAULT_DECODER})')
     parser.add_argument('--num_iterations', type=int, default=5, help='Number of search iterations')
     parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration (how many seeds to sample)')
     parser.add_argument('--top_k_pool', type=int, default=30, help='Pool size for softmax-weighted sampling (e.g., 30 = sample from top 30 programs using softmax probabilities)')
@@ -1002,6 +1021,7 @@ def main():
         lr=args.lr,
         trust_region_lambda=args.trust_region_lambda,
         temperature=args.temperature,
+        encoder_name=args.encoder,
         decoder_name=args.decoder,
         device=args.device,
         output_dir=args.output_dir,

@@ -26,6 +26,8 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Tuple, Dict, List
 from tqdm import tqdm
 
+from model_config import DEFAULT_ENCODER
+
 
 class PairwiseDataset(Dataset):
     """Dataset of (u_better, u_worse, score_diff) pairs for ranking."""
@@ -160,15 +162,21 @@ def evaluate_programs(task_name: str, programs: Dict[str, str], use_secure: bool
     return pd.DataFrame(results)
 
 
-def get_encoder_model(device: str = 'cuda'):
+def get_encoder_model(device: str = 'cuda', model_name: str = None):
     """
     Load the same encoder model used in unified training and programDB.
-    Uses BAAI/bge-code-v1 SentenceTransformer.
+
+    Args:
+        device: Device to load the model on.
+        model_name: Encoder model name. Defaults to DEFAULT_ENCODER from model_config.py
     """
+    if model_name is None:
+        model_name = DEFAULT_ENCODER
+
     from sentence_transformers import SentenceTransformer
 
     encoder_model = SentenceTransformer(
-        "BAAI/bge-code-v1",
+        model_name,
         trust_remote_code=True,
         model_kwargs={"torch_dtype": torch.float16},
     ).to(device)
@@ -569,16 +577,28 @@ def save_ranking_predictor(
     predictor: RankingScorePredictor,
     path: str,
     history: Optional[Dict] = None,
-    extra_info: Optional[Dict] = None
+    extra_info: Optional[Dict] = None,
+    encoder_name: str = None
 ):
-    """Save ranking predictor to disk."""
+    """Save ranking predictor to disk.
+
+    Args:
+        predictor: The ranking predictor model.
+        path: Path to save the checkpoint.
+        history: Optional training history.
+        extra_info: Optional extra info to save.
+        encoder_name: Encoder model name used. Defaults to DEFAULT_ENCODER.
+    """
+    if encoder_name is None:
+        encoder_name = DEFAULT_ENCODER
+
     checkpoint = {
         'model_state_dict': predictor.state_dict(),
         'input_dim': predictor.input_dim,
         'hidden_dim': predictor.hidden_dim,
         'num_layers': predictor.num_layers,
         'space': 'u_conditional',  # Indicates this model operates on conditional u-space
-        'encoder': 'BAAI/bge-code-v1',  # Encoder used for z embeddings
+        'encoder': encoder_name,  # Encoder used for z embeddings
     }
 
     if history is not None:
@@ -633,6 +653,7 @@ def main():
     parser.add_argument('--min_score_diff', type=float, default=0.0, help='Min score diff for pairs')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for evaluation')
+    parser.add_argument('--encoder', type=str, default=DEFAULT_ENCODER, help=f'Encoder model (default: {DEFAULT_ENCODER})')
 
     args = parser.parse_args()
 
@@ -657,9 +678,9 @@ def main():
     print(f"Parallel workers: {args.num_workers}")
     print()
 
-    # Load encoder model (BAAI/bge-code-v1)
-    print("Loading encoder model (BAAI/bge-code-v1)...")
-    encoder_model = get_encoder_model(args.device)
+    # Load encoder model
+    print(f"Loading encoder model ({args.encoder})...")
+    encoder_model = get_encoder_model(args.device, args.encoder)
     print("Encoder loaded.\n")
 
     # Load conditional flow model
@@ -730,7 +751,8 @@ def main():
         predictor=predictor,
         path=output_path,
         history=history,
-        extra_info=extra_info
+        extra_info=extra_info,
+        encoder_name=args.encoder
     )
 
     print(f"\nDone! Model saved to {output_path}")

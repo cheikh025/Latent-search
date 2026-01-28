@@ -13,6 +13,7 @@ import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
 from programDB import ProgramDatabase
 from task.tsp_construct.evaluation import TSPEvaluation
 from mapper import Mapper
@@ -25,19 +26,28 @@ import os
 import json
 
 
-def load_trained_models(mapper_path, flow_path, device="cuda"):
-    """Load trained mapper and flow models, reading dimensions from checkpoints."""
+def load_trained_models(mapper_path, flow_path, device="cuda", decoder_name=None):
+    """Load trained mapper and flow models, reading dimensions from checkpoints.
 
-    # Load decoder (QWEN2.5 Coder)
-    print("Loading decoder model...")
+    Args:
+        mapper_path: Path to trained mapper checkpoint.
+        flow_path: Path to trained normalizing flow checkpoint.
+        device: Device to use.
+        decoder_name: Decoder model name. Defaults to DEFAULT_DECODER from model_config.py
+    """
+    if decoder_name is None:
+        decoder_name = DEFAULT_DECODER
+
+    # Load decoder
+    print(f"Loading decoder model: {decoder_name}...")
     decoder_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-Coder-7B-Instruct",
+        decoder_name,
         torch_dtype=torch.float16,
         device_map="auto",
         trust_remote_code=True
     )
     decoder_tokenizer = AutoTokenizer.from_pretrained(
-        "Qwen/Qwen2.5-Coder-7B-Instruct",
+        decoder_name,
         trust_remote_code=True
     )
     if decoder_tokenizer.pad_token is None:
@@ -401,16 +411,25 @@ def gradient_evolution(
 
 def main():
     """Main gradient evolution workflow."""
+    import argparse
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    parser = argparse.ArgumentParser(description="Gradient-based evolutionary search")
+    parser.add_argument("--encoder", type=str, default=DEFAULT_ENCODER, help=f"Encoder model name (default: {DEFAULT_ENCODER})")
+    parser.add_argument("--decoder", type=str, default=DEFAULT_DECODER, help=f"Decoder model name (default: {DEFAULT_DECODER})")
+    parser.add_argument("--mapper", type=str, default="Mapper_Checkpoints/Mapper.pth", help="Path to mapper checkpoint")
+    parser.add_argument("--flow", type=str, default="Flow_Checkpoints/normalizing_flow_final.pth", help="Path to flow checkpoint")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
+    args = parser.parse_args()
+
+    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
     print(f"Using device: {device}")
 
     # ===== LOAD TRAINED MODELS =====
-    mapper_path = "Mapper_Checkpoints/Mapper.pth"
-    flow_path = "Flow_Checkpoints/normalizing_flow_final.pth"
+    mapper_path = args.mapper
+    flow_path = args.flow
 
     decoder_model, decoder_tokenizer, mapper_model, flow_model = load_trained_models(
-        mapper_path, flow_path, device
+        mapper_path, flow_path, device, decoder_name=args.decoder
     )
 
     # ===== LOAD EVALUATOR =====
@@ -421,14 +440,15 @@ def main():
     program_db = ProgramDatabase()
 
     if os.path.exists("task/tsp_construct/heuristics.json"):
-        print("\nLoading initial programs from JSON...")
+        print(f"\nLoading initial programs from JSON...")
+        print(f"Using encoder: {args.encoder}")
         encoder_model = SentenceTransformer(
-            "BAAI/bge-code-v1",
+            args.encoder,
             trust_remote_code=True,
             model_kwargs={"torch_dtype": torch.float16}
         ).to(device)
         encoder_tokenizer = AutoTokenizer.from_pretrained(
-            "BAAI/bge-code-v1",
+            args.encoder,
             trust_remote_code=True
         )
         program_db.load_func_from_json(

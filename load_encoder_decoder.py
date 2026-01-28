@@ -13,9 +13,19 @@ import torch
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
 
-def load_encoder(model_name: str = "BAAI/bge-code-v1", device: str = "cuda"):
-    """Load encoder with the same settings as training."""
+
+def load_encoder(model_name: str = None, device: str = "cuda"):
+    """Load encoder with the same settings as training.
+
+    Args:
+        model_name: Encoder model name. Defaults to DEFAULT_ENCODER from model_config.py
+        device: Device to load the model on.
+    """
+    if model_name is None:
+        model_name = DEFAULT_ENCODER
+
     encoder_model = SentenceTransformer(
         model_name,
         trust_remote_code=True,
@@ -25,8 +35,16 @@ def load_encoder(model_name: str = "BAAI/bge-code-v1", device: str = "cuda"):
     return encoder_model
 
 
-def load_decoder(model_name: str = "Qwen/Qwen3-4B-Instruct-2507"):
-    """Load Qwen decoder with Flash Attention 2 (same as training)."""
+def load_decoder(model_name: str = None, device: str = "auto"):
+    """Load decoder with Flash Attention 2 (same as training).
+
+    Args:
+        model_name: Decoder model name. Defaults to DEFAULT_DECODER from model_config.py
+        device: Device map for model placement. Defaults to "auto".
+    """
+    if model_name is None:
+        model_name = DEFAULT_DECODER
+
     decoder_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
@@ -49,14 +67,14 @@ def load_decoder(model_name: str = "Qwen/Qwen3-4B-Instruct-2507"):
 
 def main():
     parser = argparse.ArgumentParser(description="Load encoder + decoder models")
-    parser.add_argument("--encoder", type=str, default="BAAI/bge-code-v1", help="Encoder model name")
-    parser.add_argument("--decoder", type=str, default="Qwen/Qwen3-4B-Instruct-2507", help="Decoder model name")
+    parser.add_argument("--encoder", type=str, default=DEFAULT_ENCODER, help=f"Encoder model name (default: {DEFAULT_ENCODER})")
+    parser.add_argument("--decoder", type=str, default=DEFAULT_DECODER, help=f"Decoder model name (default: {DEFAULT_DECODER})")
     parser.add_argument("--device", type=str, default="cuda", help="Device for encoder")
     args = parser.parse_args()
 
     # Encoder (uses same config as training)
-    if args.encoder != "BAAI/bge-code-v1":
-        print("Warning: encoder name differs from training default.")
+    if args.encoder != DEFAULT_ENCODER:
+        print(f"Warning: encoder name differs from training default ({DEFAULT_ENCODER}).")
     encoder = load_encoder(model_name=args.encoder, device=args.device)
 
     # Decoder (uses same config as training)
