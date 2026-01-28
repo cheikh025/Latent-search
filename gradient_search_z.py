@@ -339,6 +339,7 @@ def gradient_search_pipeline(
     mapper_path: str,
     num_iterations: int = 5,
     num_searches_per_iter: int = 10,
+    top_k_pool_size: int = 30,
     gradient_steps: int = 100,
     lr: float = 0.01,
     trust_region_lambda: float = 0.0,
@@ -351,12 +352,21 @@ def gradient_search_pipeline(
     """
     Full gradient search pipeline in z-space.
 
+    Key Features:
+    1. Evaluates ALL baseline heuristics on ACTUAL test instances (not predicted scores)
+    2. Maintains database of all programs (baselines + discoveries) with actual scores
+    3. Each iteration: sorts database by actual score, samples from top-k pool using softmax probabilities
+    4. Guarantees starting from PROVEN best programs, not predicted best
+    5. Softmax-weighted sampling: better programs have higher selection probability, but exploration is maintained
+    6. No repetition in sampling (samples without replacement)
+
     Args:
         task_name: Task to search for (e.g., 'tsp_construct')
         predictor_path: Path to trained ranking predictor
         mapper_path: Path to trained mapper
         num_iterations: Number of search iterations
-        num_searches_per_iter: Number of gradient searches per iteration
+        num_searches_per_iter: Number of gradient searches per iteration (how many to sample)
+        top_k_pool_size: Pool size to sample seeds from (e.g., 30 means sample from best 30 programs)
         gradient_steps: Steps per gradient search
         lr: Learning rate for gradient ascent
         trust_region_lambda: Trust region penalty coefficient (0 = disabled)
@@ -408,42 +418,68 @@ def gradient_search_pipeline(
     if skeleton_prompt is None:
         raise ValueError(f"No prompt defined for task: {task_name}")
 
-    # ===== Load Initial Data (Required for Search) =====
+    # ===== Load and Evaluate Initial Baselines =====
 
-    print(f"\nLoading heuristics from task/{task_name}/heuristics.json...")
+    print(f"\nLoading baseline heuristics from task/{task_name}/heuristics.json...")
     heuristics = load_heuristics(task_name)
-    codes = list(heuristics.values())
+    baseline_codes = list(heuristics.values())
 
-    if len(codes) == 0:
+    if len(baseline_codes) == 0:
         raise ValueError(f"No heuristics found in task/{task_name}/heuristics.json")
 
-    print(f"  Loaded {len(codes)} heuristics")
+    print(f"  Loaded {len(baseline_codes)} baseline heuristics")
 
-    # Encode existing heuristics
-    print("Encoding heuristics...")
-    with torch.no_grad():
-        init_embeddings = encoder_model.encode(
-            codes,
-            convert_to_tensor=True,
-            device=device,
-            show_progress_bar=True
-        )
-        # Convert to float32 for predictor (encoder outputs float16)
-        init_embeddings = init_embeddings.float()
+    # Initialize program database: {code_hash: {'code', 'actual_score', 'embedding', 'source'}}
+    program_database = {}
 
-    # Score existing heuristics with predictor
-    print("Scoring with predictor...")
-    with torch.no_grad():
-        init_scores = predictor(init_embeddings).squeeze()
+    # Evaluate ALL baselines to get ACTUAL scores (not predicted!)
+    print("\nEvaluating baseline heuristics on actual test instances...")
+    print("(This may take a few minutes but only runs once)")
 
-    # Sort by predicted score (descending - best first)
-    sorted_indices = torch.argsort(init_scores, descending=True)
-    init_embeddings = init_embeddings[sorted_indices]
+    for idx, code in enumerate(tqdm(baseline_codes, desc="Evaluating baselines")):
+        try:
+            # Evaluate on actual test instances
+            score = secure_eval.evaluate_program(code)
 
-    print(f"  Top predicted score: {init_scores.max().item():.4f}")
-    print(f"  Bottom predicted score: {init_scores.min().item():.4f}")
+            if score is None or not np.isfinite(score):
+                if verbose:
+                    print(f"  Baseline {idx+1}: Invalid score, skipping")
+                continue
 
-    # Keep encoder loaded for re-encoding new programs
+            # Encode
+            with torch.no_grad():
+                z_embedding = encoder_model.encode(
+                    [code],
+                    convert_to_tensor=True,
+                    device=device,
+                    show_progress_bar=False
+                )[0].float()
+
+            # Add to database
+            code_hash = hash(code.strip())
+            program_database[code_hash] = {
+                'code': code,
+                'actual_score': float(score),
+                'embedding': z_embedding,
+                'source': 'baseline',
+                'iteration': -1
+            }
+
+        except Exception as e:
+            if verbose:
+                print(f"  Baseline {idx+1}: Error - {e}")
+            continue
+
+    if len(program_database) == 0:
+        raise ValueError("No valid baseline programs after evaluation!")
+
+    print(f"\n✓ Successfully evaluated {len(program_database)} baseline programs")
+
+    # Sort by actual score to show statistics (DESCENDING - higher is better!)
+    sorted_baselines = sorted(program_database.values(), key=lambda x: x['actual_score'], reverse=True)
+    print(f"  Best baseline score: {sorted_baselines[0]['actual_score']:.4f}")
+    print(f"  Worst baseline score: {sorted_baselines[-1]['actual_score']:.4f}")
+    print(f"  Mean baseline score: {np.mean([p['actual_score'] for p in program_database.values()]):.4f}")
 
     # ===== Run Search =====
 
@@ -455,12 +491,56 @@ def gradient_search_pipeline(
         print(f"Iteration {iteration + 1}/{num_iterations}")
         print(f"{'='*70}")
 
-        # Gradient search
-        print(f"\nRunning gradient search ({num_searches_per_iter} starts, {gradient_steps} steps)...")
+        # Sort ALL programs (baselines + discoveries) by ACTUAL score
+        # Higher score is better (evaluators return negative costs)
+        sorted_programs = sorted(
+            program_database.values(),
+            key=lambda x: x['actual_score'],
+            reverse=True  # DESCENDING - higher (less negative) is better
+        )
+
+        # Create top-k pool and sample seeds based on softmax probabilities
+        # This adds stochasticity to avoid getting stuck in same neighborhoods
+        # while favoring better programs (higher scores have higher selection probability)
+        pool_size = min(top_k_pool_size, len(sorted_programs))
+        top_k_pool = sorted_programs[:pool_size]
+
+        num_seeds = min(num_searches_per_iter, pool_size)
+
+        # Compute softmax probabilities based on scores
+        # Higher score (less negative) = higher probability
+        pool_scores = np.array([p['actual_score'] for p in top_k_pool])
+
+        # Apply softmax: exp(score) / sum(exp(score))
+        # Use temperature=1.0 for standard softmax (can be tuned for more/less exploration)
+        exp_scores = np.exp(pool_scores - np.max(pool_scores))  # Subtract max for numerical stability
+        probabilities = exp_scores / np.sum(exp_scores)
+
+        # Sample from top-k pool using softmax probabilities (no replacement)
+        sampled_indices = np.random.choice(pool_size, num_seeds, replace=False, p=probabilities)
+        top_k_programs = [top_k_pool[i] for i in sampled_indices]
+
+        # Extract embeddings from sampled programs
+        init_embeddings = torch.stack([p['embedding'] for p in top_k_programs])
+
+        # Get score range and probabilities for logging
+        sampled_scores = [top_k_programs[i]['actual_score'] for i in range(num_seeds)]
+        sampled_probs = [probabilities[i] for i in sampled_indices]
+        best_sampled = max(sampled_scores)
+        worst_sampled = min(sampled_scores)
+
+        print(f"\nStarting gradient search by sampling {num_seeds} from top-{pool_size} programs (softmax-weighted):")
+        print(f"  Best score in database: {sorted_programs[0]['actual_score']:.4f} ({sorted_programs[0]['source']})")
+        print(f"  Best in sampled seeds: {best_sampled:.4f} (P={max(sampled_probs):.3f})")
+        print(f"  Worst in sampled seeds: {worst_sampled:.4f} (P={min(sampled_probs):.3f})")
+        print(f"  Database size: {len(program_database)} programs")
+
+        # Gradient search in z-space from sampled seeds
+        print(f"\nRunning gradient search in z-space ({num_seeds} starts, {gradient_steps} steps)...")
 
         optimized_z = multi_start_gradient_search(
             predictor=predictor,
-            num_starts=num_searches_per_iter,
+            num_starts=num_seeds,
             steps=gradient_steps,
             lr=lr,
             trust_region_lambda=trust_region_lambda,
@@ -543,6 +623,26 @@ def gradient_search_pipeline(
                     'function_name': func_name
                 })
 
+                # Add to program database with actual score
+                code_hash_new = hash(clean_code.strip())
+                if code_hash_new not in program_database:
+                    # Encode the new program
+                    with torch.no_grad():
+                        z_new = encoder_model.encode(
+                            [clean_code],
+                            convert_to_tensor=True,
+                            device=device,
+                            show_progress_bar=False
+                        )[0].float()
+
+                    program_database[code_hash_new] = {
+                        'code': clean_code,
+                        'actual_score': float(score),
+                        'embedding': z_new,
+                        'source': 'discovered',
+                        'iteration': iteration
+                    }
+
                 successful += 1
 
                 if verbose:
@@ -563,25 +663,11 @@ def gradient_search_pipeline(
         if all_results:
             scores = [r['score'] for r in all_results]
             print(f"  Best score so far: {max(scores):.4f}")
-            print(f"  Avg score: {np.mean(scores):.4f}")
 
-        # Update init_embeddings with successful programs for next iteration
-        if successful > 0:
-            # Re-encode successful programs (using already-loaded encoder)
-            new_codes = [r['code'] for r in all_results[-successful:]]
-            with torch.no_grad():
-                new_embeddings = encoder_model.encode(
-                    new_codes,
-                    convert_to_tensor=True,
-                    device=device,
-                    show_progress_bar=False
-                ).float()  # Convert to float32
-
-            # Combine with existing
-            if init_embeddings is not None:
-                init_embeddings = torch.cat([new_embeddings, init_embeddings], dim=0)
-            else:
-                init_embeddings = new_embeddings
+        # Show best score in entire database
+        db_scores = [p['actual_score'] for p in program_database.values()]
+        print(f"  Best score in database: {max(db_scores):.4f}")
+        print(f"  Database size: {len(program_database)} programs")
 
     # ===== Final Results =====
 
@@ -590,18 +676,32 @@ def gradient_search_pipeline(
     print(f"{'='*70}")
 
     print(f"\nTotal programs discovered: {len(successful_programs)}")
+    print(f"Total programs in database: {len(program_database)}")
+
+    # Database statistics
+    db_programs = list(program_database.values())
+    db_programs.sort(key=lambda x: x['actual_score'], reverse=True)
+
+    if db_programs:
+        db_scores = [p['actual_score'] for p in db_programs]
+        print(f"\nDatabase Statistics:")
+        print(f"  Best score: {max(db_scores):.4f}")
+        print(f"  Worst score: {min(db_scores):.4f}")
+        print(f"  Mean score: {np.mean(db_scores):.4f}")
+        print(f"  Std score: {np.std(db_scores):.4f}")
 
     if all_results:
         # Sort by score
         all_results.sort(key=lambda x: x['score'], reverse=True)
 
         scores = [r['score'] for r in all_results]
-        print(f"Best score: {max(scores):.4f}")
-        print(f"Avg score: {np.mean(scores):.4f}")
-        print(f"Std score: {np.std(scores):.4f}")
+        print(f"\nDiscovered Programs Statistics:")
+        print(f"  Best score: {max(scores):.4f}")
+        print(f"  Avg score: {np.mean(scores):.4f}")
+        print(f"  Std score: {np.std(scores):.4f}")
 
         # Show top 5
-        print(f"\nTop 5 Programs:")
+        print(f"\nTop 5 Discovered Programs:")
         print("-"*70)
         for i, result in enumerate(all_results[:5]):
             print(f"\n{i+1}. Score: {result['score']:.4f} | {result['function_name']}")
@@ -611,17 +711,32 @@ def gradient_search_pipeline(
 
     # ===== Save Results =====
 
-    # Save programs as JSON
+    # Save discovered programs as JSON
     programs_path = os.path.join(output_dir, f"{task_name}_gradient_searched.json")
     with open(programs_path, 'w') as f:
         json.dump(successful_programs, f, indent=2)
-    print(f"\nSaved {len(successful_programs)} programs to {programs_path}")
+    print(f"\nSaved {len(successful_programs)} discovered programs to {programs_path}")
 
     # Save detailed results
     results_path = os.path.join(output_dir, f"{task_name}_search_results.json")
     with open(results_path, 'w') as f:
         json.dump(all_results, f, indent=2)
     print(f"Saved detailed results to {results_path}")
+
+    # Save full database (baselines + discoveries) with actual scores
+    database_export = []
+    for prog in db_programs:
+        database_export.append({
+            'code': prog['code'],
+            'actual_score': prog['actual_score'],
+            'source': prog['source'],
+            'iteration': prog['iteration']
+        })
+
+    database_path = os.path.join(output_dir, f"{task_name}_full_database.json")
+    with open(database_path, 'w') as f:
+        json.dump(database_export, f, indent=2)
+    print(f"Saved full database ({len(database_export)} programs) to {database_path}")
 
     # Clean up encoder
     del encoder_model
@@ -641,7 +756,8 @@ def main():
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
     parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='Decoder model')
     parser.add_argument('--num_iterations', type=int, default=5, help='Number of search iterations')
-    parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration')
+    parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration (how many seeds to sample)')
+    parser.add_argument('--top_k_pool', type=int, default=30, help='Pool size for softmax-weighted sampling (e.g., 30 = sample from top 30 programs using softmax probabilities)')
     parser.add_argument('--gradient_steps', type=int, default=100, help='Gradient steps per search')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--trust_region_lambda', type=float, default=0.0, help='Trust region penalty coefficient (0 = disabled)')
@@ -657,6 +773,7 @@ def main():
         mapper_path=args.mapper,
         num_iterations=args.num_iterations,
         num_searches_per_iter=args.num_searches,
+        top_k_pool_size=args.top_k_pool,
         gradient_steps=args.gradient_steps,
         lr=args.lr,
         trust_region_lambda=args.trust_region_lambda,
