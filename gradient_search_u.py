@@ -28,6 +28,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 
@@ -381,6 +382,94 @@ def generate_code_from_z(
         return clean_code, raw_output
 
 
+def generate_code_from_z_batch(
+    z_vectors: torch.Tensor,
+    mapper_model,
+    decoder_model,
+    decoder_tokenizer,
+    skeleton_prompt: str,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    max_new_tokens: int = 1024
+) -> list:
+    """
+    Generate code from multiple latent vectors in a single batch.
+
+    Args:
+        z_vectors: Tensor of shape [batch_size, dim]
+        mapper_model: Trained mapper
+        decoder_model: Decoder LLM
+        decoder_tokenizer: Tokenizer
+        skeleton_prompt: Task instruction prompt
+        temperature: Sampling temperature
+        top_p: Nucleus sampling parameter
+        max_new_tokens: Maximum tokens to generate
+
+    Returns:
+        List of (clean_code, raw_output) tuples
+    """
+    embed_layer = decoder_model.get_input_embeddings()
+    device = embed_layer.weight.device
+    dtype = embed_layer.weight.dtype
+
+    # Ensure correct shape
+    if isinstance(z_vectors, np.ndarray):
+        z_vectors = torch.from_numpy(z_vectors)
+
+    if z_vectors.dim() == 1:
+        z_vectors = z_vectors.unsqueeze(0)
+
+    batch_size = z_vectors.shape[0]
+    z_vectors = z_vectors.to(device).float()
+
+    with torch.no_grad():
+        # Batch map z -> soft prompts: [batch_size, num_tokens, hidden_dim]
+        soft_prompt_embeds = mapper_model(z_vectors).to(device, dtype=dtype)
+
+        # Prepare instruction (same for all samples)
+        instruction_messages = [{"role": "user", "content": skeleton_prompt}]
+        instruction_ids = decoder_tokenizer.apply_chat_template(
+            instruction_messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(device)
+
+        # Get instruction embeddings and repeat for batch
+        instruction_embeds = embed_layer(instruction_ids)  # [1, seq_len, hidden]
+        instruction_embeds = instruction_embeds.expand(batch_size, -1, -1)  # [batch, seq_len, hidden]
+
+        # Concatenate: [batch, num_soft_tokens + seq_len, hidden]
+        inputs_embeds = torch.cat([soft_prompt_embeds, instruction_embeds], dim=1)
+
+        # Create attention mask (all 1s since no padding in inputs)
+        attention_mask = torch.ones(
+            batch_size, inputs_embeds.shape[1],
+            dtype=torch.long, device=device
+        )
+
+        # Batched generation
+        generated_ids = decoder_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=True,
+            pad_token_id=decoder_tokenizer.pad_token_id,
+            eos_token_id=decoder_tokenizer.eos_token_id
+        )
+
+        # Decode all outputs
+        results = []
+        for i in range(batch_size):
+            raw_output = decoder_tokenizer.decode(generated_ids[i], skip_special_tokens=True)
+            clean_code = extract_python_code_robust(raw_output, include_preface=True)
+            results.append((clean_code, raw_output))
+
+        return results
+
+
 # ============================================================================
 # Main Search Pipeline
 # ============================================================================
@@ -400,6 +489,8 @@ def gradient_search_pipeline_u(
     decoder_name: str = "Qwen/Qwen3-4B-Instruct-2507",
     device: str = "cuda",
     output_dir: str = "gradient_search_u_results",
+    num_evaluators: int = 4,
+    generation_batch_size: int = 4,
     verbose: bool = True
 ):
     """
@@ -412,6 +503,8 @@ def gradient_search_pipeline_u(
     4. Guarantees starting from PROVEN best programs, not predicted best
     5. Softmax-weighted sampling: better programs have higher selection probability, but exploration is maintained
     6. No repetition in sampling (samples without replacement)
+    7. Batched code generation for efficiency
+    8. Parallel evaluation using ThreadPoolExecutor
 
     Args:
         task_name: Task to search for (e.g., 'tsp_construct')
@@ -428,6 +521,8 @@ def gradient_search_pipeline_u(
         decoder_name: Decoder model name
         device: Device to use
         output_dir: Directory to save results
+        num_evaluators: Number of parallel evaluation workers (default: 4)
+        generation_batch_size: Batch size for code generation (default: 4, adjust based on GPU memory)
         verbose: Print progress
     """
 
@@ -440,6 +535,8 @@ def gradient_search_pipeline_u(
     print(f"Predictor: {predictor_path}")
     print(f"Flow: {flow_path}")
     print(f"Mapper: {mapper_path}")
+    print(f"Parallel evaluators: {num_evaluators}")
+    print(f"Generation batch size: {generation_batch_size}")
     print()
 
     # ===== Load Models =====
@@ -490,20 +587,37 @@ def gradient_search_pipeline_u(
     # Initialize program database: {code_hash: {'code', 'actual_score', 'embedding', 'source'}}
     program_database = {}
 
-    # Evaluate ALL baselines to get ACTUAL scores (not predicted!)
-    print("\nEvaluating baseline heuristics on actual test instances...")
+    # Evaluate ALL baselines to get ACTUAL scores (not predicted!) - PARALLEL
+    print(f"\nEvaluating baseline heuristics on actual test instances (parallel, {num_evaluators} workers)...")
     print("(This may take a few minutes but only runs once)")
 
-    for idx, code in enumerate(tqdm(baseline_codes, desc="Evaluating baselines")):
+    def eval_baseline(idx_code):
+        """Evaluate a single baseline heuristic."""
+        idx, code = idx_code
         try:
-            # Evaluate on actual test instances
             score = secure_eval.evaluate_program(code)
+            return idx, code, score, None
+        except Exception as e:
+            return idx, code, None, str(e)
 
-            if score is None or not np.isfinite(score):
-                if verbose:
-                    print(f"  Baseline {idx+1}: Invalid score, skipping")
-                continue
+    # Submit all baseline evaluations in parallel
+    baseline_results = []
+    with ThreadPoolExecutor(max_workers=num_evaluators) as executor:
+        futures = {executor.submit(eval_baseline, (idx, code)): idx
+                   for idx, code in enumerate(baseline_codes)}
 
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating baselines"):
+            baseline_results.append(future.result())
+
+    # Process results and encode (encoding stays sequential - GPU bound)
+    valid_baselines = [(idx, code, score) for idx, code, score, error in baseline_results
+                       if score is not None and np.isfinite(score)]
+
+    print(f"  Valid baselines: {len(valid_baselines)}/{len(baseline_codes)}")
+    print("  Encoding valid baselines...")
+
+    for idx, code, score in tqdm(valid_baselines, desc="Encoding baselines"):
+        try:
             # Encode
             with torch.no_grad():
                 z_embedding = encoder_model.encode(
@@ -525,7 +639,7 @@ def gradient_search_pipeline_u(
 
         except Exception as e:
             if verbose:
-                print(f"  Baseline {idx+1}: Error - {e}")
+                print(f"  Baseline {idx+1}: Encoding error - {e}")
             continue
 
     if len(program_database) == 0:
@@ -608,110 +722,120 @@ def gradient_search_pipeline_u(
             verbose=verbose
         )
 
-        # Generate and evaluate
-        print(f"\nGenerating and evaluating {len(optimized_z)} candidates...")
+        # ===== BATCHED GENERATION =====
+        print(f"\nGenerating {len(optimized_z)} candidates in batches (batch_size={generation_batch_size})...")
 
-        successful = 0
-        failed = 0
+        all_generated = []
+        for batch_start in range(0, len(optimized_z), generation_batch_size):
+            batch_end = min(batch_start + generation_batch_size, len(optimized_z))
+            z_batch = optimized_z[batch_start:batch_end]
 
-        for idx, z in enumerate(optimized_z):
+            batch_results = generate_code_from_z_batch(
+                z_batch,
+                mapper_model,
+                decoder_model,
+                decoder_tokenizer,
+                skeleton_prompt,
+                temperature=temperature
+            )
+            all_generated.extend(batch_results)
+
             if verbose:
-                print(f"\n--- Candidate {idx+1}/{len(optimized_z)} ---")
+                print(f"  Generated batch {batch_start//generation_batch_size + 1}/{(len(optimized_z) + generation_batch_size - 1)//generation_batch_size}")
 
+        # ===== VALIDATE AND FILTER =====
+        print(f"Validating {len(all_generated)} generated programs...")
+
+        valid_candidates = []
+        existing_hashes = set(hash(c.strip()) for c in successful_programs.values())
+
+        for idx, (clean_code, raw_output) in enumerate(all_generated):
+            # Validate syntax
+            if not clean_code or not is_valid_python(clean_code):
+                continue
+
+            # Parse function
+            program = TextFunctionProgramConverter.text_to_program(clean_code)
+            if program is None or len(program.functions) == 0:
+                continue
+
+            func_name = program.functions[0].name
+
+            # Check for duplicates
+            code_hash = hash(clean_code.strip())
+            if code_hash in existing_hashes:
+                continue
+
+            existing_hashes.add(code_hash)
+            valid_candidates.append((idx, clean_code, func_name))
+
+        print(f"  Valid candidates: {len(valid_candidates)}/{len(all_generated)}")
+
+        # ===== PARALLEL EVALUATION =====
+        print(f"Evaluating {len(valid_candidates)} candidates in parallel ({num_evaluators} workers)...")
+
+        def eval_candidate(item):
+            """Evaluate a single candidate."""
+            idx, clean_code, func_name = item
             try:
-                # Generate code
-                clean_code, raw_output = generate_code_from_z(
-                    z.cpu().numpy(),
-                    mapper_model,
-                    decoder_model,
-                    decoder_tokenizer,
-                    skeleton_prompt,
-                    temperature=temperature
-                )
-
-                # Validate
-                if not clean_code or not is_valid_python(clean_code):
-                    if verbose:
-                        print("  Invalid Python syntax")
-                    failed += 1
-                    continue
-
-                # Parse function
-                program = TextFunctionProgramConverter.text_to_program(clean_code)
-                if program is None or len(program.functions) == 0:
-                    if verbose:
-                        print("  Could not parse function")
-                    failed += 1
-                    continue
-
-                func_name = program.functions[0].name
-
-                # Check for duplicates
-                code_hash = hash(clean_code.strip())
-                if code_hash in [hash(c.strip()) for c in successful_programs.values()]:
-                    if verbose:
-                        print("  Duplicate program")
-                    failed += 1
-                    continue
-
-                # Evaluate
-                try:
-                    score = secure_eval.evaluate_program(clean_code)
-
-                    if score is None or not np.isfinite(score):
-                        if verbose:
-                            print(f"  Invalid score: {score}")
-                        failed += 1
-                        continue
-
-                except Exception as e:
-                    if verbose:
-                        print(f"  Evaluation error: {e}")
-                    failed += 1
-                    continue
-
-                # Success! Add to database with ACTUAL score
-                program_id = f"iter{iteration}_idx{idx}"
-                successful_programs[program_id] = clean_code
-
-                # Add to program database
-                code_hash_new = hash(clean_code.strip())
-                if code_hash_new not in program_database:
-                    # Encode the new program
-                    with torch.no_grad():
-                        z_new = encoder_model.encode(
-                            [clean_code],
-                            convert_to_tensor=True,
-                            device=device,
-                            show_progress_bar=False
-                        )[0].float()
-
-                    program_database[code_hash_new] = {
-                        'code': clean_code,
-                        'actual_score': float(score),
-                        'embedding': z_new,
-                        'source': 'discovered',
-                        'iteration': iteration
-                    }
-
-                all_results.append({
-                    'program_id': program_id,
-                    'iteration': iteration,
-                    'score': score,
-                    'code': clean_code,
-                    'function_name': func_name
-                })
-
-                successful += 1
-
-                if verbose:
-                    print(f"  ✓ Score: {score:.4f} | Function: {func_name}")
-
+                score = secure_eval.evaluate_program(clean_code)
+                return idx, clean_code, func_name, score, None
             except Exception as e:
-                if verbose:
-                    print(f"  Error: {e}")
+                return idx, clean_code, func_name, None, str(e)
+
+        eval_results = []
+        with ThreadPoolExecutor(max_workers=num_evaluators) as executor:
+            futures = {executor.submit(eval_candidate, item): item[0]
+                       for item in valid_candidates}
+
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating candidates"):
+                eval_results.append(future.result())
+
+        # ===== PROCESS RESULTS =====
+        successful = 0
+        failed = len(all_generated) - len(valid_candidates)  # Already failed validation
+
+        for idx, clean_code, func_name, score, error in eval_results:
+            if score is None or not np.isfinite(score):
                 failed += 1
                 continue
+
+            # Success! Add to database with ACTUAL score
+            program_id = f"iter{iteration}_idx{idx}"
+            successful_programs[program_id] = clean_code
+
+            # Add to program database
+            code_hash_new = hash(clean_code.strip())
+            if code_hash_new not in program_database:
+                # Encode the new program
+                with torch.no_grad():
+                    z_new = encoder_model.encode(
+                        [clean_code],
+                        convert_to_tensor=True,
+                        device=device,
+                        show_progress_bar=False
+                    )[0].float()
+
+                program_database[code_hash_new] = {
+                    'code': clean_code,
+                    'actual_score': float(score),
+                    'embedding': z_new,
+                    'source': 'discovered',
+                    'iteration': iteration
+                }
+
+            all_results.append({
+                'program_id': program_id,
+                'iteration': iteration,
+                'score': score,
+                'code': clean_code,
+                'function_name': func_name
+            })
+
+            successful += 1
+
+            if verbose:
+                print(f"  ✓ Score: {score:.4f} | Function: {func_name}")
 
         # Iteration summary
         print(f"\nIteration {iteration + 1} Summary:")
@@ -841,6 +965,8 @@ def main():
     parser.add_argument('--temperature', type=float, default=0.7, help='Decoder temperature')
     parser.add_argument('--output_dir', type=str, default='gradient_search_u_results', help='Output directory')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
+    parser.add_argument('--num_evaluators', type=int, default=4, help='Number of parallel evaluation workers')
+    parser.add_argument('--generation_batch_size', type=int, default=4, help='Batch size for code generation (adjust based on GPU memory)')
 
     args = parser.parse_args()
 
@@ -859,6 +985,8 @@ def main():
         decoder_name=args.decoder,
         device=args.device,
         output_dir=args.output_dir,
+        num_evaluators=args.num_evaluators,
+        generation_batch_size=args.generation_batch_size,
         verbose=True
     )
 
