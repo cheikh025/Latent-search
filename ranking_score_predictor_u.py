@@ -528,7 +528,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Train ranking score predictor')
     parser.add_argument('--task', type=str, default='tsp_construct', help='Task name')
-    parser.add_argument('--flow_path', type=str, default='flow.pth', help='Path to trained flow model')
+    parser.add_argument('--flow_path', type=str, default='Flow_Checkpoints/unified_flow_final.pth', help='Path to trained flow model')
     parser.add_argument('--output_dir', type=str, default='Predictor_Checkpoints', help='Output directory for saved models')
     parser.add_argument('--output', type=str, default=None, help='Output filename (default: ranking_predictor_u_{task}.pth)')
     parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
