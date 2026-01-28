@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import os
 import json
+import hashlib
 import utils as utils
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Sequence
@@ -50,33 +51,38 @@ class CodeNormalizer(ast.NodeTransformer):
         node.arg = self.get_normalized_name(node.arg)
         return node
 
+def get_structure_hash(code_str: str) -> Optional[str]:
+    """
+    Computes a canonical SHA256 hash of the code structure,
+    ignoring comments, whitespace, and variable/function names.
+    """
+    try:
+        # 1. Parse code strings into ASTs
+        tree = ast.parse(code_str)
+
+        # 2. Normalize tree
+        normalizer = CodeNormalizer()
+        normalized_tree = normalizer.visit(tree)
+
+        # 3. Dump the normalized tree and hash it
+        dump = ast.dump(normalized_tree)
+        return hashlib.sha256(dump.encode('utf-8')).hexdigest()
+
+    except SyntaxError:
+        return None
+
 def are_codes_structurally_same(code1_str: str, code2_str: str) -> bool:
     """
     Checks if two Python code strings are structurally equivalent,
     ignoring comments, whitespace, and variable/function names.
     """
-    try:
-        # 1. Parse code strings into ASTs
-        tree1 = ast.parse(code1_str)
-        tree2 = ast.parse(code2_str)
+    hash1 = get_structure_hash(code1_str)
+    hash2 = get_structure_hash(code2_str)
 
-        # 2. Normalize both trees
-        normalizer1 = CodeNormalizer()
-        normalized_tree1 = normalizer1.visit(tree1)
-
-        normalizer2 = CodeNormalizer()
-        normalized_tree2 = normalizer2.visit(tree2)
-
-        # 3. Compare the string dump of the normalized trees
-        # ast.dump provides a consistent string representation of the tree's structure.
-        dump1 = ast.dump(normalized_tree1)
-        dump2 = ast.dump(normalized_tree2)
-
-        return dump1 == dump2
-
-    except SyntaxError:
-        # If code can't be parsed, it's not valid Python.
+    if hash1 is None or hash2 is None:
         return False
+
+    return hash1 == hash2
 
 
 
@@ -88,7 +94,7 @@ class ProgramDatabase:
         self.df = pd.DataFrame(
             columns=[
                 "program_id", "code", "z", "score", "origin",
-                "generation"
+                "generation", "structure_hash"
             ]
         )
         self.df.set_index("program_id", inplace=True)
@@ -118,6 +124,9 @@ class ProgramDatabase:
         else:
             mean_score = float(score) if score is not None and np.isfinite(score) else np.nan
 
+        # Compute structure hash for O(1) existence checks
+        struct_hash = get_structure_hash(code)
+
         row = {
             "program_id": pid,
             "code": code,
@@ -125,6 +134,7 @@ class ProgramDatabase:
             "score": mean_score,
             "origin": origin,
             "generation": generation,
+            "structure_hash": struct_hash
         }
         self.df.loc[pid] = row
         return pid
@@ -144,6 +154,13 @@ class ProgramDatabase:
 
     def exists(self, code_to_check):
         #return (self.df['code'] == code).any()
+        target_hash = get_structure_hash(code_to_check)
+        if target_hash is None:
+            return False
+
+        if 'structure_hash' in self.df.columns:
+            return (self.df['structure_hash'] == target_hash).any()
+
         return self.df['code'].apply(lambda existing_code: are_codes_structurally_same(code_to_check, existing_code)).any()
 
     def to_disk(self, path):
@@ -158,6 +175,12 @@ class ProgramDatabase:
         self.df = pd.read_parquet(path)
         #self.df.set_index('program_id', inplace=True)
         self.df['z'] = self.df['z'].apply(lambda x: np.squeeze(np.array(x, dtype=np.float32)))
+
+        # Backfill structure_hash if missing (for legacy databases)
+        if 'structure_hash' not in self.df.columns:
+            print("Backfilling structure hashes for optimized existence checks...")
+            self.df['structure_hash'] = self.df['code'].apply(get_structure_hash)
+
         self.program_counter = len(self.df)
 
     def __len__(self):
