@@ -1,8 +1,16 @@
 """
-Ranking-based score predictor operating directly on z-space (CodeBERT embeddings).
+Ranking-based score predictor for gradient-based optimization in prior space (u-space)
+using a TASK-CONDITIONAL normalizing flow.
 
-No normalizing flow required - learns to rank programs from their embeddings directly.
+Uses pairwise ranking loss instead of MSE regression to handle small datasets.
 From n programs, creates n*(n-1)/2 pairs for training.
+
+This version is designed to work with gradient_search_u_conditional.py which uses
+a task-conditional flow. The u-space vectors will be consistent between training
+and search.
+
+Encoder: BAAI/bge-code-v1 (same as unified mapper training)
+Pipeline: code -> z (encoder) -> u (conditional flow) -> score (predictor)
 """
 
 import json
@@ -20,24 +28,26 @@ from tqdm import tqdm
 
 
 class PairwiseDataset(Dataset):
-    """Dataset of (z_better, z_worse, score_diff) pairs for ranking."""
+    """Dataset of (u_better, u_worse, score_diff) pairs for ranking."""
 
-    def __init__(self, z_better: torch.Tensor, z_worse: torch.Tensor, score_diffs: torch.Tensor):
-        self.z_better = z_better
-        self.z_worse = z_worse
+    def __init__(self, u_better: torch.Tensor, u_worse: torch.Tensor, score_diffs: torch.Tensor):
+        self.u_better = u_better
+        self.u_worse = u_worse
         self.score_diffs = score_diffs
 
     def __len__(self):
-        return len(self.z_better)
+        return len(self.u_better)
 
     def __getitem__(self, idx):
-        return self.z_better[idx], self.z_worse[idx], self.score_diffs[idx]
+        return self.u_better[idx], self.u_worse[idx], self.score_diffs[idx]
 
 
 class RankingScorePredictor(nn.Module):
     """
-    MLP that predicts score from z-space vector (BAAI/bge-code-v1 embedding).
+    MLP that predicts score from prior-space vector u.
     Trained with ranking loss for better generalization on small datasets.
+
+    Uses BAAI/bge-code-v1 for z embeddings, then conditional normalizing flow for z -> u.
 
     R: R^d -> R
     """
@@ -62,9 +72,9 @@ class RankingScorePredictor(nn.Module):
 
         self.network = nn.Sequential(*layers)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """Predict score from z-space vector."""
-        return self.network(z)
+    def forward(self, u: torch.Tensor) -> torch.Tensor:
+        """Predict score from prior-space vector."""
+        return self.network(u)
 
 
 def load_heuristics(task_name: str) -> Dict[str, str]:
@@ -201,10 +211,71 @@ def encode_programs(codes: List[str], encoder_model=None, device: str = 'cuda', 
     return torch.tensor(np.vstack(embeddings), dtype=torch.float32, device=device)
 
 
+def load_conditional_flow(flow_path: str, device: str = "cuda"):
+    """
+    Load trained conditional normalizing flow (and task-conditional prior if present).
+
+    Same loading logic as gradient_search_u_conditional.py for consistency.
+    """
+    from normalizing_flow import NormalizingFlow
+    from train_conditional_flow import TaskConditionalPrior
+
+    print(f"Loading conditional flow from {flow_path}...")
+
+    checkpoint = torch.load(flow_path, map_location=device)
+
+    # Extract architecture parameters (conditional checkpoints use flow_* keys)
+    dim = checkpoint.get('flow_dim', checkpoint.get('dim', checkpoint.get('embedding_dim', 768)))
+    num_layers = checkpoint.get('flow_num_layers', checkpoint.get('num_layers', 4))
+    hidden_dim = checkpoint.get('flow_hidden_dim', checkpoint.get('hidden_dim', 128))
+    dropout = checkpoint.get('flow_dropout', checkpoint.get('dropout', 0.0))
+
+    print(f"  Dimension: {dim}")
+    print(f"  Layers: {num_layers}")
+    print(f"  Hidden dim: {hidden_dim}")
+    print(f"  Dropout: {dropout} (disabled in eval mode)")
+
+    # Create flow model with dropout (disabled in eval mode)
+    flow_model = NormalizingFlow(dim=dim, num_layers=num_layers, hidden_dim=hidden_dim, dropout=dropout)
+
+    flow_state = checkpoint.get('flow_state_dict', checkpoint.get('model_state_dict'))
+    if flow_state is None:
+        raise KeyError("Conditional flow checkpoint missing flow_state_dict/model_state_dict")
+
+    flow_model.load_state_dict(flow_state)
+    flow_model.to(device)
+    flow_model.eval()
+
+    prior_model = None
+    if 'prior_state_dict' in checkpoint:
+        num_tasks = checkpoint.get('prior_num_tasks') or checkpoint.get('num_tasks')
+        if num_tasks is None:
+            task_map = checkpoint.get('task_to_id', {})
+            num_tasks = len(task_map) if task_map else None
+        prior_dim = checkpoint.get('prior_dim', dim)
+
+        if num_tasks is not None:
+            prior_model = TaskConditionalPrior(num_tasks=num_tasks, dim=prior_dim)
+            prior_model.load_state_dict(checkpoint['prior_state_dict'])
+            prior_model.to(device)
+            prior_model.eval()
+
+    task_to_id = checkpoint.get('task_to_id')
+    id_to_task = checkpoint.get('id_to_task')
+
+    print(f"  Flow loaded successfully")
+    if prior_model is not None:
+        print(f"  Task-conditional prior loaded")
+
+    return flow_model, prior_model, task_to_id, id_to_task, dim
+
+
 def create_pairwise_data(
     scores: np.ndarray,
     embeddings: torch.Tensor,
-    min_score_diff: float = 0.0
+    flow_model,
+    min_score_diff: float = 0.0,
+    device: str = 'cuda'
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Create pairwise ranking data from evaluated programs.
@@ -212,15 +283,21 @@ def create_pairwise_data(
     Args:
         scores: Array of program scores
         embeddings: Tensor of program embeddings (z-space) [n, dim]
+        flow_model: Normalizing flow to map z -> u
         min_score_diff: Minimum score difference to exclude ties
+        device: Device to use
 
     Returns:
-        z_better: Z-space vectors of better programs
-        z_worse: Z-space vectors of worse programs
+        u_better: Prior-space vectors of better programs
+        u_worse: Prior-space vectors of worse programs
         score_diffs: Score differences (always positive)
     """
     n = len(scores)
-    device = embeddings.device
+
+    # Map z -> u using flow
+    flow_model.eval()
+    with torch.no_grad():
+        u_all, _ = flow_model(embeddings.to(device))
 
     # Create pairs
     better_indices = []
@@ -242,15 +319,16 @@ def create_pairwise_data(
             worse_indices.append(i)
             diffs.append(-diff)
 
-    z_better = embeddings[better_indices]
-    z_worse = embeddings[worse_indices]
+    u_better = u_all[better_indices]
+    u_worse = u_all[worse_indices]
     score_diffs = torch.tensor(diffs, dtype=torch.float32, device=device)
 
-    return z_better, z_worse, score_diffs
+    return u_better, u_worse, score_diffs
 
 
 def create_dataset_from_task(
     task_name: str,
+    flow_model,
     min_score_diff: float = 0.0,
     device: str = 'cuda',
     encoder_model=None,
@@ -261,6 +339,7 @@ def create_dataset_from_task(
 
     Args:
         task_name: Name of the task
+        flow_model: Trained conditional normalizing flow
         min_score_diff: Minimum score difference for pairs
         device: Device to use
         encoder_model: Optional pre-loaded encoder model
@@ -268,7 +347,7 @@ def create_dataset_from_task(
 
     Returns:
         dataset: PairwiseDataset for training
-        df: DataFrame with evaluated programs and embeddings
+        df: DataFrame with evaluated programs
     """
     # Load and evaluate
     programs = load_heuristics(task_name)
@@ -283,20 +362,20 @@ def create_dataset_from_task(
     # Encode programs
     codes = df['code'].tolist()
     embeddings = encode_programs(codes, encoder_model=encoder_model, device=device)
-    df['z'] = list(embeddings.cpu().numpy())
 
-    # Get embeddings tensor from dataframe
-    z_array = np.stack(df['z'].values)
-    embeddings = torch.tensor(z_array, dtype=torch.float32, device=device)
+    # Store embeddings in dataframe
+    df['z'] = list(embeddings.cpu().numpy())
 
     # Create pairwise data
     scores = df['score'].values
-    z_better, z_worse, score_diffs = create_pairwise_data(scores, embeddings, min_score_diff)
+    u_better, u_worse, score_diffs = create_pairwise_data(
+        scores, embeddings, flow_model, min_score_diff, device
+    )
 
-    print(f"Created {len(z_better)} pairs from {len(df)} programs")
-    print(f"  Amplification: {len(z_better) / len(df):.1f}x")
+    print(f"Created {len(u_better)} pairs from {len(df)} programs")
+    print(f"  Amplification: {len(u_better) / len(df):.1f}x")
 
-    dataset = PairwiseDataset(z_better, z_worse, score_diffs)
+    dataset = PairwiseDataset(u_better, u_worse, score_diffs)
 
     return dataset, df
 
@@ -306,7 +385,7 @@ class RankingLoss(nn.Module):
     Soft ranking loss using sigmoid + BCE.
     Provides smooth gradients for optimization.
 
-    P(i > j) = sigmoid(tau * (R(z_i) - R(z_j)))
+    P(i > j) = sigmoid(tau * (R(u_i) - R(u_j)))
     loss = -log(P(i > j))
 
     Uses numerically stable logsigmoid implementation.
@@ -317,6 +396,14 @@ class RankingLoss(nn.Module):
         self.tau = tau
 
     def forward(self, score_better: torch.Tensor, score_worse: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            score_better: Predicted scores for better programs [batch]
+            score_worse: Predicted scores for worse programs [batch]
+
+        Returns:
+            loss: Scalar loss value
+        """
         diff = score_better - score_worse
         # Use numerically stable logsigmoid instead of log(sigmoid())
         loss = -F.logsigmoid(self.tau * diff).mean()
@@ -397,14 +484,14 @@ def train_ranking_predictor(
         train_loss = 0.0
         n_batches = 0
 
-        for z_better, z_worse, _ in train_loader:
-            z_better = z_better.to(device)
-            z_worse = z_worse.to(device)
+        for u_better, u_worse, _ in train_loader:
+            u_better = u_better.to(device)
+            u_worse = u_worse.to(device)
 
             optimizer.zero_grad()
 
-            score_better = predictor(z_better).squeeze()
-            score_worse = predictor(z_worse).squeeze()
+            score_better = predictor(u_better).squeeze()
+            score_worse = predictor(u_worse).squeeze()
 
             loss = criterion(score_better, score_worse)
             loss.backward()
@@ -424,12 +511,12 @@ def train_ranking_predictor(
         total = 0
 
         with torch.no_grad():
-            for z_better, z_worse, _ in val_loader:
-                z_better = z_better.to(device)
-                z_worse = z_worse.to(device)
+            for u_better, u_worse, _ in val_loader:
+                u_better = u_better.to(device)
+                u_worse = u_worse.to(device)
 
-                score_better = predictor(z_better).squeeze()
-                score_worse = predictor(z_worse).squeeze()
+                score_better = predictor(u_better).squeeze()
+                score_worse = predictor(u_worse).squeeze()
 
                 loss = criterion(score_better, score_worse)
                 val_loss += loss.item()
@@ -490,8 +577,8 @@ def save_ranking_predictor(
         'input_dim': predictor.input_dim,
         'hidden_dim': predictor.hidden_dim,
         'num_layers': predictor.num_layers,
-        'space': 'z',  # Indicates this model operates on z-space
-        'encoder': 'BAAI/bge-code-v1',  # Encoder used for embeddings
+        'space': 'u_conditional',  # Indicates this model operates on conditional u-space
+        'encoder': 'BAAI/bge-code-v1',  # Encoder used for z embeddings
     }
 
     if history is not None:
@@ -517,149 +604,11 @@ def load_ranking_predictor(path: str, device: str = 'cuda') -> Tuple[RankingScor
     predictor.to(device)
 
     print(f"Loaded ranking predictor from {path}")
-    print(f"  Space: {checkpoint.get('space', 'z')}")
+    print(f"  Space: {checkpoint.get('space', 'u_conditional')}")
     print(f"  Encoder: {checkpoint.get('encoder', 'BAAI/bge-code-v1')}")
     print(f"  Input dim: {checkpoint['input_dim']}")
 
     return predictor, checkpoint
-
-
-# ============================================================================
-# Gradient search in z-space (for use with this predictor)
-# ============================================================================
-
-def gradient_ascent_in_z(
-    predictor: RankingScorePredictor,
-    num_starts: int = 10,
-    steps: int = 100,
-    lr: float = 0.01,
-    init_z: Optional[torch.Tensor] = None,
-    device: str = 'cuda',
-    verbose: bool = False
-) -> torch.Tensor:
-    """
-    Perform gradient ascent in z-space to find high-scoring regions.
-
-    Args:
-        predictor: Trained ranking score predictor R(z)
-        num_starts: Number of random starting points
-        steps: Number of gradient ascent steps
-        lr: Learning rate for gradient ascent
-        init_z: Optional initial z values [num_starts, dim]
-        device: Device to use
-        verbose: Print progress
-
-    Returns:
-        best_z: Optimized z-space vectors [num_starts, dim]
-    """
-    predictor.eval()
-
-    # Initialize starting points
-    if init_z is None:
-        # Sample from standard Gaussian (approximate z distribution)
-        z = torch.randn(num_starts, predictor.input_dim, device=device, requires_grad=True)
-    else:
-        z = init_z.clone().to(device).requires_grad_(True)
-        num_starts = z.shape[0]
-
-    if verbose:
-        print(f"\nGradient ascent with {num_starts} starting points for {steps} steps...")
-
-    # Gradient ascent
-    for step in range(steps):
-        if z.grad is not None:
-            z.grad.zero_()
-
-        # Predict score
-        pred_scores = predictor(z)
-
-        # Maximize score (gradient ascent)
-        loss = -pred_scores.mean()
-        loss.backward()
-
-        # Update z
-        with torch.no_grad():
-            z += lr * z.grad
-
-        if verbose and (step + 1) % 20 == 0:
-            avg_score = -loss.item()
-            print(f"  Step {step+1}/{steps} | Avg predicted score: {avg_score:.4f}")
-
-    # Final scores
-    with torch.no_grad():
-        final_scores = predictor(z)
-
-    if verbose:
-        print(f"\nFinal predicted scores:")
-        print(f"  Min: {final_scores.min().item():.4f}")
-        print(f"  Max: {final_scores.max().item():.4f}")
-        print(f"  Mean: {final_scores.mean().item():.4f}")
-
-    return z.detach()
-
-
-def adaptive_gradient_search_z(
-    predictor: RankingScorePredictor,
-    df: pd.DataFrame,
-    num_searches: int = 5,
-    steps_per_search: int = 100,
-    lr: float = 0.01,
-    init_from_top_k: int = 5,
-    device: str = 'cuda',
-    verbose: bool = True
-) -> torch.Tensor:
-    """
-    Adaptive gradient search: start from top-k programs and optimize in z-space.
-
-    Args:
-        predictor: Trained ranking score predictor
-        df: DataFrame with 'z' and 'score' columns
-        num_searches: Number of optimization runs
-        steps_per_search: Gradient steps per run
-        lr: Learning rate
-        init_from_top_k: Initialize from top-k programs
-        device: Device to use
-        verbose: Print progress
-
-    Returns:
-        optimized_z: Optimized z-space vectors
-    """
-    # Get top-k programs
-    top_k = df.nlargest(init_from_top_k, 'score')
-
-    if len(top_k) == 0:
-        raise ValueError("No valid programs in dataframe")
-
-    # Get their z embeddings
-    z_top = torch.tensor(
-        np.stack(top_k['z'].values),
-        dtype=torch.float32,
-        device=device
-    )
-
-    if verbose:
-        print(f"\nAdaptive gradient search starting from top {len(top_k)} programs")
-        print(f"Top scores: {top_k['score'].values}")
-
-    # Sample starting points from top programs
-    init_indices = np.random.choice(len(z_top), size=num_searches, replace=True)
-    z_init = z_top[init_indices]
-
-    # Add small noise for exploration
-    z_init = z_init + torch.randn_like(z_init) * 0.1
-
-    # Perform gradient ascent
-    optimized_z = gradient_ascent_in_z(
-        predictor,
-        num_starts=num_searches,
-        steps=steps_per_search,
-        lr=lr,
-        init_z=z_init,
-        device=device,
-        verbose=verbose
-    )
-
-    return optimized_z
 
 
 # ============================================================================
@@ -670,10 +619,11 @@ def main():
     import argparse
     import os
 
-    parser = argparse.ArgumentParser(description='Train ranking score predictor (z-space)')
+    parser = argparse.ArgumentParser(description='Train ranking score predictor (U-Space with Conditional Flow)')
     parser.add_argument('--task', type=str, default='tsp_construct', help='Task name')
+    parser.add_argument('--flow_path', type=str, default='Flow_Checkpoints/conditional_flow_final.pth', help='Path to trained conditional flow model')
     parser.add_argument('--output_dir', type=str, default='Predictor_Checkpoints', help='Output directory for saved models')
-    parser.add_argument('--output', type=str, default=None, help='Output filename (default: ranking_predictor_z_{task}.pth)')
+    parser.add_argument('--output', type=str, default=None, help='Output filename (default: ranking_predictor_u_conditional_{task}.pth)')
     parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
@@ -691,15 +641,16 @@ def main():
 
     # Set default output filename if not provided
     if args.output is None:
-        args.output = f"ranking_predictor_z_{args.task}.pth"
+        args.output = f"ranking_predictor_u_conditional_{args.task}.pth"
 
     # Full output path
     output_path = os.path.join(args.output_dir, args.output)
 
     print("="*70)
-    print("Ranking Score Predictor Training (Z-Space)")
+    print("Ranking Score Predictor Training (U-Space with Conditional Flow)")
     print("="*70)
     print(f"Task: {args.task}")
+    print(f"Flow model: {args.flow_path} (conditional)")
     print(f"Output: {output_path}")
     print(f"Loss: Soft ranking (tau={args.tau})")
     print(f"Device: {args.device}")
@@ -711,9 +662,20 @@ def main():
     encoder_model = get_encoder_model(args.device)
     print("Encoder loaded.\n")
 
-    # Create dataset (no flow model needed!)
+    # Load conditional flow model
+    flow_model, prior_model, task_to_id, id_to_task, flow_dim = load_conditional_flow(
+        args.flow_path, args.device
+    )
+
+    # Log task mapping if available
+    if task_to_id is not None and args.task in task_to_id:
+        print(f"  Task '{args.task}' has ID: {task_to_id[args.task]}")
+    print()
+
+    # Create dataset
     dataset, df = create_dataset_from_task(
         task_name=args.task,
+        flow_model=flow_model,
         min_score_diff=args.min_score_diff,
         device=args.device,
         encoder_model=encoder_model,
@@ -726,9 +688,8 @@ def main():
 
     print(f"\nDataset size: {len(dataset)} pairs")
 
-    # Create predictor - get input_dim from actual embeddings
-    input_dim = df['z'].iloc[0].shape[0]  # Get dim from encoded embeddings
-    print(f"Embedding dimension: {input_dim}")
+    # Create predictor - input_dim comes from flow (u-space has same dim as z-space)
+    input_dim = flow_dim
     predictor = RankingScorePredictor(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
@@ -748,18 +709,28 @@ def main():
         verbose=True
     )
 
-    # Save
+    # Save with extra info about the conditional flow
+    extra_info = {
+        'task': args.task,
+        'loss_type': 'soft',
+        'tau': args.tau,
+        'n_pairs': len(dataset),
+        'n_programs': len(df),
+        'flow_path': args.flow_path,
+        'flow_type': 'conditional',
+    }
+
+    # Include task mapping if available
+    if task_to_id is not None:
+        extra_info['task_to_id'] = task_to_id
+    if id_to_task is not None:
+        extra_info['id_to_task'] = id_to_task
+
     save_ranking_predictor(
         predictor=predictor,
         path=output_path,
         history=history,
-        extra_info={
-            'task': args.task,
-            'loss_type': 'soft',
-            'tau': args.tau,
-            'n_pairs': len(dataset),
-            'n_programs': len(df)
-        }
+        extra_info=extra_info
     )
 
     print(f"\nDone! Model saved to {output_path}")

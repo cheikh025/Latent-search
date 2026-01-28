@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from itertools import combinations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Tuple, Dict, List
 from tqdm import tqdm
@@ -108,22 +109,48 @@ def get_evaluator(task_name: str):
     return EvaluatorClass()
 
 
-def evaluate_programs(task_name: str, programs: Dict[str, str], use_secure: bool = True) -> pd.DataFrame:
-    """Evaluate all programs for a task and return DataFrame with scores."""
+def evaluate_programs(task_name: str, programs: Dict[str, str], use_secure: bool = True, num_workers: int = 4) -> pd.DataFrame:
+    """
+    Evaluate all programs for a task and return DataFrame with scores.
+
+    Args:
+        task_name: Name of the task
+        programs: Dictionary of {name: code} pairs
+        use_secure: Whether to use SecureEvaluator wrapper
+        num_workers: Number of parallel workers for evaluation
+
+    Returns:
+        DataFrame with columns ['name', 'code', 'score']
+    """
     evaluator = get_evaluator(task_name)
 
     if use_secure:
         from base.evaluate import SecureEvaluator
         evaluator = SecureEvaluator(evaluator, debug_mode=False)
 
-    results = []
-    for name, code in tqdm(programs.items(), desc=f"Evaluating {task_name}"):
+    def eval_single(name_code):
+        """Evaluate a single program."""
+        name, code = name_code
         try:
             score = evaluator.evaluate_program(code)
             if score is not None and np.isfinite(score):
-                results.append({'name': name, 'code': code, 'score': score})
+                return {'name': name, 'code': code, 'score': score}
         except Exception:
             pass
+        return None
+
+    results = []
+
+    # Parallel evaluation
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(eval_single, (name, code)): name
+                   for name, code in programs.items()}
+
+        for future in tqdm(as_completed(futures), total=len(futures),
+                          desc=f"Evaluating {task_name} ({num_workers} workers)"):
+            result = future.result()
+            if result is not None:
+                results.append(result)
 
     return pd.DataFrame(results)
 
@@ -240,7 +267,8 @@ def create_dataset_from_task(
     flow_model,
     min_score_diff: float = 0.0,
     device: str = 'cuda',
-    encoder_model=None
+    encoder_model=None,
+    num_workers: int = 4
 ) -> Tuple[PairwiseDataset, pd.DataFrame]:
     """
     Create pairwise dataset from a task's heuristics.
@@ -251,6 +279,7 @@ def create_dataset_from_task(
         min_score_diff: Minimum score difference for pairs
         device: Device to use
         encoder_model: Optional pre-loaded encoder model
+        num_workers: Number of parallel workers for evaluation
 
     Returns:
         dataset: PairwiseDataset for training
@@ -260,7 +289,7 @@ def create_dataset_from_task(
     programs = load_heuristics(task_name)
     print(f"Loaded {len(programs)} programs from {task_name}")
 
-    df = evaluate_programs(task_name, programs)
+    df = evaluate_programs(task_name, programs, num_workers=num_workers)
     print(f"Successfully evaluated {len(df)} programs")
 
     if len(df) < 2:
@@ -539,6 +568,7 @@ def main():
     parser.add_argument('--tau', type=float, default=1.0, help='Temperature for soft ranking loss (higher = sharper gradients)')
     parser.add_argument('--min_score_diff', type=float, default=0.0, help='Min score diff for pairs')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for evaluation')
 
     args = parser.parse_args()
 
@@ -560,6 +590,7 @@ def main():
     print(f"Output: {output_path}")
     print(f"Loss: Soft ranking (tau={args.tau})")
     print(f"Device: {args.device}")
+    print(f"Parallel workers: {args.num_workers}")
     print()
 
     # Load encoder model (BAAI/bge-code-v1)
@@ -598,7 +629,8 @@ def main():
         flow_model=flow_model,
         min_score_diff=args.min_score_diff,
         device=args.device,
-        encoder_model=encoder_model
+        encoder_model=encoder_model,
+        num_workers=args.num_workers
     )
 
     # Free encoder memory after encoding

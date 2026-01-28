@@ -24,7 +24,7 @@ from sentence_transformers import SentenceTransformer
 from mapper import Mapper
 from normalizing_flow import NormalizingFlow
 from train_conditional_flow import TaskConditionalPrior
-from ranking_score_predictor_u import (
+from ranking_score_predictor_u_conditional import (
     RankingScorePredictor,
     load_ranking_predictor,
     get_encoder_model,
