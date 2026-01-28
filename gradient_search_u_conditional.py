@@ -972,7 +972,7 @@ def gradient_search_pipeline_u(
 def main():
     parser = argparse.ArgumentParser(description='Gradient search in u-space (prior space) using conditional flow')
     parser.add_argument('--task', type=str, default='tsp_construct', help='Task name')
-    parser.add_argument('--predictor', type=str, default='ranking_predictor_u.pth', help='Path to u-space ranking predictor')
+    parser.add_argument('--predictor', type=str, default='Predictor_Checkpoints/ranking_predictor_u_conditional_tsp_construct.pth', help='Path to conditional u-space ranking predictor')
     parser.add_argument('--flow', type=str, default='Flow_Checkpoints/conditional_flow_final.pth', help='Path to conditional normalizing flow')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
     parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507', help='Decoder model')

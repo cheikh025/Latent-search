@@ -426,8 +426,8 @@ def train_ranking_predictor(
 
             optimizer.zero_grad()
 
-            score_better = predictor(u_better).squeeze()
-            score_worse = predictor(u_worse).squeeze()
+            score_better = predictor(u_better).squeeze(-1)
+            score_worse = predictor(u_worse).squeeze(-1)
 
             loss = criterion(score_better, score_worse)
             loss.backward()
@@ -451,15 +451,15 @@ def train_ranking_predictor(
                 u_better = u_better.to(device)
                 u_worse = u_worse.to(device)
 
-                score_better = predictor(u_better).squeeze()
-                score_worse = predictor(u_worse).squeeze()
+                score_better = predictor(u_better).squeeze(-1)
+                score_worse = predictor(u_worse).squeeze(-1)
 
                 loss = criterion(score_better, score_worse)
                 val_loss += loss.item()
 
                 # Pairwise accuracy
                 correct += (score_better > score_worse).sum().item()
-                total += len(score_better)
+                total += score_better.numel()
 
         avg_val_loss = val_loss / max(len(val_loader), 1)
         val_accuracy = correct / max(total, 1)
