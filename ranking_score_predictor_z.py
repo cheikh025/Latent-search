@@ -87,9 +87,9 @@ def get_evaluator(task_name: str):
         'vrptw_construct': ('task.vrptw_construct.evaluation', 'VRPTWEvaluation'),
         'jssp_construct': ('task.jssp_construct.evaluation', 'JSSPEvaluation'),
         'knapsack_construct': ('task.knapsack_construct.evaluation', 'KnapsackEvaluation'),
-        'online_bin_packing': ('task.online_bin_packing.evaluation', 'BinPackingEvaluation'),
+        'online_bin_packing': ('task.online_bin_packing.evaluation', 'OBPEvaluation'),
         'qap_construct': ('task.qap_construct.evaluation', 'QAPEvaluation'),
-        'set_cover_construct': ('task.set_cover_construct.evaluation', 'SetCoverEvaluation'),
+        'set_cover_construct': ('task.set_cover_construct.evaluation', 'SCPEvaluation'),
         'cflp_construct': ('task.cflp_construct.evaluation', 'CFLPEvaluation'),
         'admissible_set': ('task.admissible_set.evaluation', 'ASPEvaluation'),
     }

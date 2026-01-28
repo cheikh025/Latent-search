@@ -24,7 +24,7 @@ TASK_EVALUATORS = {
     'knapsack_construct': ('task.knapsack_construct.evaluation', 'KnapsackEvaluation'),
     'online_bin_packing': ('task.online_bin_packing.evaluation', 'OBPEvaluation'),
     'qap_construct': ('task.qap_construct.evaluation', 'QAPEvaluation'),
-    'set_cover_construct': ('task.set_cover_construct.evaluation', 'SetCoverEvaluation'),
+    'set_cover_construct': ('task.set_cover_construct.evaluation', 'SCPEvaluation'),
     'cflp_construct': ('task.cflp_construct.evaluation', 'CFLPEvaluation'),
     'admissible_set': ('task.admissible_set.evaluation', 'ASPEvaluation'),
 }
@@ -111,10 +111,22 @@ def evaluate_task_heuristics(task_name: str, num_workers: int = 4):
                 none_scores.append((name, error))
 
     # Summary
-    valid_count = sum(1 for _, score, _ in results if score is not None)
+    valid_scores = [score for _, score, _ in results if score is not None]
+    valid_count = len(valid_scores)
     none_count = len(none_scores)
 
     print(f"\n  Results: {valid_count} valid, {none_count} with None score")
+
+    # Print score statistics
+    if valid_scores:
+        import numpy as np
+        scores_arr = np.array(valid_scores)
+        print(f"\n  Score Statistics:")
+        print(f"  {'-'*50}")
+        print(f"    Best (max):  {scores_arr.max():.6f}")
+        print(f"    Worst (min): {scores_arr.min():.6f}")
+        print(f"    Mean:        {scores_arr.mean():.6f}")
+        print(f"    Std:         {scores_arr.std():.6f}")
 
     if none_scores:
         print(f"\n  Heuristics with None score:")
