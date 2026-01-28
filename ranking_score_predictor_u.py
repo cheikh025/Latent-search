@@ -524,11 +524,13 @@ def load_ranking_predictor(path: str, device: str = 'cuda') -> Tuple[RankingScor
 
 def main():
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(description='Train ranking score predictor')
     parser.add_argument('--task', type=str, default='tsp_construct', help='Task name')
     parser.add_argument('--flow_path', type=str, default='flow.pth', help='Path to trained flow model')
-    parser.add_argument('--output', type=str, default='ranking_predictor.pth', help='Output path')
+    parser.add_argument('--output_dir', type=str, default='Predictor_Checkpoints', help='Output directory for saved models')
+    parser.add_argument('--output', type=str, default=None, help='Output filename (default: ranking_predictor_u_{task}.pth)')
     parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
@@ -540,11 +542,22 @@ def main():
 
     args = parser.parse_args()
 
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Set default output filename if not provided
+    if args.output is None:
+        args.output = f"ranking_predictor_u_{args.task}.pth"
+
+    # Full output path
+    output_path = os.path.join(args.output_dir, args.output)
+
     print("="*70)
     print("Ranking Score Predictor Training (U-Space)")
     print("="*70)
     print(f"Task: {args.task}")
     print(f"Flow model: {args.flow_path}")
+    print(f"Output: {output_path}")
     print(f"Loss: Soft ranking (tau={args.tau})")
     print(f"Device: {args.device}")
     print()
@@ -618,7 +631,7 @@ def main():
     # Save
     save_ranking_predictor(
         predictor=predictor,
-        path=args.output,
+        path=output_path,
         history=history,
         extra_info={
             'task': args.task,
@@ -629,7 +642,7 @@ def main():
         }
     )
 
-    print(f"\nDone! Model saved to {args.output}")
+    print(f"\nDone! Model saved to {output_path}")
 
 
 if __name__ == '__main__':
