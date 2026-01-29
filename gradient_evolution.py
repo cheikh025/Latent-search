@@ -13,7 +13,8 @@ import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
-from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER, DEFAULT_MATRYOSHKA_DIM
+from load_encoder_decoder import load_encoder
 from programDB import ProgramDatabase
 from task.tsp_construct.evaluation import TSPEvaluation
 from mapper import Mapper
@@ -415,6 +416,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="Gradient-based evolutionary search")
     parser.add_argument("--encoder", type=str, default=DEFAULT_ENCODER, help=f"Encoder model name (default: {DEFAULT_ENCODER})")
+    parser.add_argument("--embedding-dim", type=int, default=None,
+                        help=f"Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or 'model native'})")
     parser.add_argument("--decoder", type=str, default=DEFAULT_DECODER, help=f"Decoder model name (default: {DEFAULT_DECODER})")
     parser.add_argument("--mapper", type=str, default="Mapper_Checkpoints/Mapper.pth", help="Path to mapper checkpoint")
     parser.add_argument("--flow", type=str, default="Flow_Checkpoints/normalizing_flow_final.pth", help="Path to flow checkpoint")
@@ -442,11 +445,12 @@ def main():
     if os.path.exists("task/tsp_construct/heuristics.json"):
         print(f"\nLoading initial programs from JSON...")
         print(f"Using encoder: {args.encoder}")
-        encoder_model = SentenceTransformer(
-            args.encoder,
-            trust_remote_code=True,
-            model_kwargs={"torch_dtype": torch.float16}
-        ).to(device)
+        encoder_model, embedding_dim = load_encoder(
+            model_name=args.encoder,
+            device=device,
+            truncate_dim=getattr(args, 'embedding_dim', None)
+        )
+        print(f"Embedding dimension: {embedding_dim}")
         encoder_tokenizer = AutoTokenizer.from_pretrained(
             args.encoder,
             trust_remote_code=True

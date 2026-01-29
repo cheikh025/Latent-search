@@ -24,7 +24,8 @@ from typing import Optional, Tuple, Dict, List
 from tqdm import tqdm
 from scipy.stats import spearmanr, kendalltau
 
-from model_config import DEFAULT_ENCODER
+from model_config import DEFAULT_ENCODER, DEFAULT_MATRYOSHKA_DIM
+from load_encoder_decoder import load_encoder
 
 
 class PairwiseDataset(Dataset):
@@ -158,27 +159,19 @@ def evaluate_programs(task_name: str, programs: Dict[str, str], use_secure: bool
     return pd.DataFrame(results)
 
 
-def get_encoder_model(device: str = 'cuda', model_name: str = None):
+def get_encoder_model(device: str = 'cuda', model_name: str = None, truncate_dim: int = None):
     """
     Load the same encoder model used in unified training and programDB.
 
     Args:
         device: Device to load the model on.
         model_name: Encoder model name. Defaults to DEFAULT_ENCODER from model_config.py
+        truncate_dim: Matryoshka dimension. If None, uses DEFAULT_MATRYOSHKA_DIM from config.
+
+    Returns:
+        Tuple of (encoder_model, embedding_dim)
     """
-    if model_name is None:
-        model_name = DEFAULT_ENCODER
-
-    from sentence_transformers import SentenceTransformer
-
-    encoder_model = SentenceTransformer(
-        model_name,
-        trust_remote_code=True,
-        model_kwargs={"torch_dtype": torch.float16},
-    ).to(device)
-
-    encoder_model.eval()
-    return encoder_model
+    return load_encoder(model_name=model_name, device=device, truncate_dim=truncate_dim)
 
 
 def encode_programs(codes: List[str], encoder_model=None, device: str = 'cuda', batch_size: int = 32) -> torch.Tensor:
@@ -193,11 +186,11 @@ def encode_programs(codes: List[str], encoder_model=None, device: str = 'cuda', 
         batch_size: Batch size for encoding
 
     Returns:
-        Tensor of embeddings [n, 1024]
+        Tensor of embeddings [n, embedding_dim]
     """
     # Load encoder if not provided
     if encoder_model is None:
-        encoder_model = get_encoder_model(device)
+        encoder_model, _ = get_encoder_model(device)
 
     embeddings = []
 
@@ -862,6 +855,8 @@ def main():
     parser.add_argument('--device', type=str, default='cuda', help='Device')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for evaluation')
     parser.add_argument('--encoder', type=str, default=DEFAULT_ENCODER, help=f'Encoder model (default: {DEFAULT_ENCODER})')
+    parser.add_argument('--embedding-dim', type=int, default=None,
+                        help=f'Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or "model native"})')
 
     args = parser.parse_args()
 
@@ -889,8 +884,8 @@ def main():
 
     # Load encoder model
     print(f"Loading encoder model ({args.encoder})...")
-    encoder_model = get_encoder_model(args.device, args.encoder)
-    print("Encoder loaded.\n")
+    encoder_model, embedding_dim = get_encoder_model(args.device, args.encoder, getattr(args, 'embedding_dim', None))
+    print(f"Encoder loaded. Embedding dimension: {embedding_dim}\n")
 
     # Create dataset with PROGRAM-LEVEL split
     train_dataset, val_dataset, df, train_indices, val_indices = create_dataset_from_task(

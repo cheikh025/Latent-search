@@ -38,6 +38,8 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from normalizing_flow import NormalizingFlow, compute_flow_loss
+from model_config import DEFAULT_ENCODER, DEFAULT_MATRYOSHKA_DIM
+from load_encoder_decoder import load_encoder
 from utils import is_valid_python
 
 
@@ -524,8 +526,19 @@ def validate_flow(flow_model: NormalizingFlow, z_combined: np.ndarray, device: s
 # Main Training Script
 # ============================================================================
 
-def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1, dropout: float = 0.1):
-    """Main training pipeline for unified normalizing flow."""
+def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1, dropout: float = 0.1,
+         encoder_name: str = None, embedding_dim: int = None):
+    """Main training pipeline for unified normalizing flow.
+
+    Args:
+        resume_checkpoint: Path to checkpoint file to resume training from.
+        holdout_ratio: Fraction of data to hold out for validation.
+        dropout: Dropout probability for regularization.
+        encoder_name: Encoder model name. Defaults to DEFAULT_ENCODER.
+        embedding_dim: Matryoshka embedding dimension. If None, uses DEFAULT_MATRYOSHKA_DIM.
+    """
+    if encoder_name is None:
+        encoder_name = DEFAULT_ENCODER
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nUsing device: {device}")
@@ -554,14 +567,13 @@ def main(resume_checkpoint: Optional[str] = None, holdout_ratio: float = 0.1, dr
     print("Loading Encoder Model")
     print(f"{'='*70}\n")
 
-    encoder_model = SentenceTransformer(
-        "BAAI/bge-code-v1",
-        trust_remote_code=True,
-        model_kwargs={"dtype": torch.float16},
-    ).to(device)
-
-    encoder_model.eval()
-    print("✓ Encoder loaded (BAAI/bge-code-v1)\n")
+    encoder_model, actual_embedding_dim = load_encoder(
+        model_name=encoder_name,
+        device=device,
+        truncate_dim=embedding_dim
+    )
+    print(f"Encoder loaded ({encoder_name})")
+    print(f"Embedding dimension: {actual_embedding_dim}\n")
 
     # ========================================================================
     # Step 3: Encode All Heuristics
@@ -777,6 +789,24 @@ if __name__ == "__main__":
         default=0.1,
         help="Dropout probability for regularization (default: 0.1)"
     )
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        default=DEFAULT_ENCODER,
+        help=f"Encoder model name (default: {DEFAULT_ENCODER})"
+    )
+    parser.add_argument(
+        "--embedding-dim",
+        type=int,
+        default=None,
+        help=f"Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or 'model native'})"
+    )
     args = parser.parse_args()
 
-    main(resume_checkpoint=args.resume, holdout_ratio=args.holdout_ratio, dropout=args.dropout)
+    main(
+        resume_checkpoint=args.resume,
+        holdout_ratio=args.holdout_ratio,
+        dropout=args.dropout,
+        encoder_name=args.encoder,
+        embedding_dim=getattr(args, 'embedding_dim', None)
+    )

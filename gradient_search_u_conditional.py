@@ -24,7 +24,7 @@ from sentence_transformers import SentenceTransformer
 from mapper import Mapper
 from normalizing_flow import NormalizingFlow
 from train_conditional_flow import TaskConditionalPrior
-from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER, DEFAULT_MATRYOSHKA_DIM
 from ranking_score_predictor_u_conditional import (
     RankingScorePredictor,
     load_ranking_predictor,
@@ -598,8 +598,8 @@ def gradient_search_pipeline_u(
 
     # Load encoder ONCE
     print(f"Loading encoder ({encoder_name})...")
-    encoder_model = get_encoder_model(device, encoder_name)
-    encoder_model.eval()
+    encoder_model, embedding_dim = get_encoder_model(device, encoder_name, getattr(args, 'embedding_dim', None))
+    print(f"Embedding dimension: {embedding_dim}")
 
     # Load evaluator
     print(f"Loading evaluator for {task_name}...")
@@ -994,6 +994,8 @@ def main():
     parser.add_argument('--flow', type=str, default='Flow_Checkpoints/conditional_flow_final.pth', help='Path to conditional normalizing flow')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
     parser.add_argument('--encoder', type=str, default=DEFAULT_ENCODER, help=f'Encoder model (default: {DEFAULT_ENCODER})')
+    parser.add_argument('--embedding-dim', type=int, default=None,
+                        help=f'Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or "model native"})')
     parser.add_argument('--decoder', type=str, default=DEFAULT_DECODER, help=f'Decoder model (default: {DEFAULT_DECODER})')
     parser.add_argument('--num_iterations', type=int, default=5, help='Number of search iterations')
     parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration (how many seeds to sample)')

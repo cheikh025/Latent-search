@@ -39,6 +39,7 @@ from sentence_transformers import SentenceTransformer
 
 from mapper import Mapper
 from normalizing_flow import NormalizingFlow
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER, DEFAULT_MATRYOSHKA_DIM
 from ranking_score_predictor_z import (
     RankingScorePredictor,
     load_ranking_predictor,
@@ -574,9 +575,10 @@ def gradient_search_pipeline_u_with_z_predictor(
     mapper_model = mapper_model.to(embed_layer.weight.device)
 
     # Load encoder
-    print("Loading encoder (BAAI/bge-code-v1)...")
-    encoder_model = get_encoder_model(device)
-    encoder_model.eval()
+    encoder_name = getattr(args, 'encoder', DEFAULT_ENCODER)
+    print(f"Loading encoder ({encoder_name})...")
+    encoder_model, embedding_dim = get_encoder_model(device, encoder_name, getattr(args, 'embedding_dim', None))
+    print(f"Embedding dimension: {embedding_dim}")
 
     # Load evaluator
     print(f"Loading evaluator for {task_name}...")
@@ -924,8 +926,12 @@ def main():
                         help='Path to normalizing flow')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth',
                         help='Path to mapper')
-    parser.add_argument('--decoder', type=str, default='Qwen/Qwen3-4B-Instruct-2507',
-                        help='Decoder model')
+    parser.add_argument('--encoder', type=str, default=DEFAULT_ENCODER,
+                        help=f'Encoder model (default: {DEFAULT_ENCODER})')
+    parser.add_argument('--embedding-dim', type=int, default=None,
+                        help=f'Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or "model native"})')
+    parser.add_argument('--decoder', type=str, default=DEFAULT_DECODER,
+                        help=f'Decoder model (default: {DEFAULT_DECODER})')
     parser.add_argument('--num_iterations', type=int, default=5,
                         help='Number of search iterations')
     parser.add_argument('--num_searches', type=int, default=10,

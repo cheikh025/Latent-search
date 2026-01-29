@@ -24,7 +24,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 
 from mapper import Mapper
-from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER, DEFAULT_MATRYOSHKA_DIM
 from ranking_score_predictor_z import (
     RankingScorePredictor,
     load_ranking_predictor,
@@ -520,8 +520,8 @@ def gradient_search_pipeline(
 
     # Load encoder ONCE (for encoding existing heuristics and new programs)
     print(f"Loading encoder ({encoder_name})...")
-    encoder_model = get_encoder_model(device, encoder_name)
-    encoder_model.eval()  # Set to eval mode
+    encoder_model, embedding_dim = get_encoder_model(device, encoder_name, getattr(args, 'embedding_dim', None))
+    print(f"Embedding dimension: {embedding_dim}")
 
     # Load evaluator
     print(f"Loading evaluator for {task_name}...")
@@ -897,6 +897,8 @@ def main():
     parser.add_argument('--predictor', type=str, default='ranking_predictor_z.pth', help='Path to ranking predictor')
     parser.add_argument('--mapper', type=str, default='Mapper_Checkpoints/unified_mapper.pth', help='Path to mapper')
     parser.add_argument('--encoder', type=str, default=DEFAULT_ENCODER, help=f'Encoder model (default: {DEFAULT_ENCODER})')
+    parser.add_argument('--embedding-dim', type=int, default=None,
+                        help=f'Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or "model native"})')
     parser.add_argument('--decoder', type=str, default=DEFAULT_DECODER, help=f'Decoder model (default: {DEFAULT_DECODER})')
     parser.add_argument('--num_iterations', type=int, default=5, help='Number of search iterations')
     parser.add_argument('--num_searches', type=int, default=10, help='Searches per iteration (how many seeds to sample)')

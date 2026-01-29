@@ -35,7 +35,8 @@ from tqdm import tqdm
 
 from mapper import Mapper
 from utils import is_valid_python
-from model_config import DEFAULT_ENCODER, DEFAULT_DECODER
+from model_config import DEFAULT_ENCODER, DEFAULT_DECODER, DEFAULT_MATRYOSHKA_DIM
+from load_encoder_decoder import load_encoder
 
 
 # ============================================================================
@@ -495,13 +496,14 @@ def train_unified_mapper_optimized(
 # Main Training Script
 # ============================================================================
 
-def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, decoder_name: str = None):
+def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, decoder_name: str = None, embedding_dim: int = None):
     """Main training pipeline with optimizations.
 
     Args:
         resume_checkpoint: Path to checkpoint file to resume training from.
         encoder_name: Encoder model name. Defaults to DEFAULT_ENCODER from model_config.py
         decoder_name: Decoder model name. Defaults to DEFAULT_DECODER from model_config.py
+        embedding_dim: Matryoshka embedding dimension. If None, uses DEFAULT_MATRYOSHKA_DIM.
     """
     if encoder_name is None:
         encoder_name = DEFAULT_ENCODER
@@ -535,14 +537,13 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
     print("Loading Encoder Model")
     print(f"{'='*70}\n")
 
-    encoder_model = SentenceTransformer(
-        encoder_name,
-        trust_remote_code=True,
-        model_kwargs={"dtype": torch.float16},
-    ).to(device)
-
-    encoder_model.eval()
-    print(f"Encoder loaded ({encoder_name})\n")
+    encoder_model, actual_embedding_dim = load_encoder(
+        model_name=encoder_name,
+        device=device,
+        truncate_dim=embedding_dim
+    )
+    print(f"Encoder loaded ({encoder_name})")
+    print(f"Embedding dimension: {actual_embedding_dim}\n")
 
     # ========================================================================
     # Step 3: Encode All Heuristics
@@ -772,6 +773,17 @@ if __name__ == "__main__":
         default=DEFAULT_DECODER,
         help=f"Decoder model name (default: {DEFAULT_DECODER})"
     )
+    parser.add_argument(
+        "--embedding-dim",
+        type=int,
+        default=None,
+        help=f"Matryoshka embedding dimension (default: {DEFAULT_MATRYOSHKA_DIM or 'model native'})"
+    )
     args = parser.parse_args()
 
-    main(resume_checkpoint=args.resume, encoder_name=args.encoder, decoder_name=args.decoder)
+    main(
+        resume_checkpoint=args.resume,
+        encoder_name=args.encoder,
+        decoder_name=args.decoder,
+        embedding_dim=getattr(args, 'embedding_dim', None)
+    )
