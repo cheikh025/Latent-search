@@ -37,7 +37,7 @@ class OriginalMapper(nn.Module):
 
 class LowRankMapper(nn.Module):
     """
-    Low-rank mapper with weight sharing for parameter efficiency.
+    Low-rank mapper with self-attention and weight sharing for parameter efficiency.
 
     This mapper is designed for smaller datasets where the original Mapper
     would have too many parameters and risk overfitting.
@@ -45,58 +45,106 @@ class LowRankMapper(nn.Module):
     Architecture:
     1. Feature expander: z -> (num_tokens * input_dim) - creates token-specific features
     2. Positional embeddings: learnable position information for each token
-    3. Shared MLP: applied to each token independently (weight sharing)
+    3. Self-attention block: allows tokens to communicate (in low-dim space)
+    4. Optional FFN: additional capacity in low-dim space
+    5. Shared MLP: up-projects each token to decoder dimension (weight sharing)
+    6. Output LayerNorm + scaling: prevents overly large prefix activations
 
-    Parameter count: ~O(num_tokens * input_dim + internal_dim * output_dim)
+    Parameter count: ~O(num_tokens * input_dim + internal_dim * output_dim + attn overhead)
     For input_dim=128, output_dim=2560, num_tokens=16, internal_dim=512:
-    ~1.6M parameters (vs ~40M+ for original mapper)
+    ~1.8M parameters (vs ~40M+ for original mapper)
 
     Args:
         input_dim: Dimension of input latent vector z
         output_dim: Dimension of output soft prompt vectors (decoder hidden size)
         num_tokens: Number of soft prompt tokens to generate
         internal_dim: Hidden dimension in the shared MLP (controls capacity)
+        attn_heads: Number of attention heads
+        attn_dropout: Dropout rate for attention
+        ffn_dropout: Dropout rate for FFN and shared MLP
+        scale: Output scaling factor (prevents large activations)
+        use_ffn: Whether to include FFN block after attention
     """
-    def __init__(self, input_dim=128, output_dim=2560, num_tokens=16, internal_dim=512):
+    def __init__(
+        self,
+        input_dim=128,
+        output_dim=2560,
+        num_tokens=16,
+        internal_dim=512,
+        attn_heads=2,
+        attn_dropout=0.1,
+        ffn_dropout=0.1,
+        scale=0.1,
+        use_ffn=True,
+    ):
         super().__init__()
         self.num_tokens = num_tokens
         self.output_dim = output_dim
         self.input_dim = input_dim
         self.internal_dim = internal_dim
+        self.scale = scale
+        self.use_ffn = use_ffn
 
-        # 1. Expand z from (Batch, input_dim) -> (Batch, num_tokens, input_dim)
-        # We learn a unique projection for each token position from the latent z
+        # Expand (B, input_dim) -> (B, num_tokens, input_dim)
         self.feature_expander = nn.Linear(input_dim, num_tokens * input_dim)
 
-        # 2. Positional Information
-        # Helps the mapper know which token comes first, second, etc.
+        # Positional embeddings in input_dim space
         self.pos_embed = nn.Parameter(torch.randn(1, num_tokens, input_dim) * 0.02)
 
-        # 3. Shared Up-Projection MLP
-        # This same MLP is applied to every token independently (Weight Sharing)
+        # Tiny self-attention block in input_dim space
+        self.ln_attn = nn.LayerNorm(input_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=input_dim,
+            num_heads=attn_heads,
+            dropout=attn_dropout,
+            batch_first=True,
+        )
+        self.drop_attn = nn.Dropout(attn_dropout)
+
+        # Optional tiny FFN (still in input_dim space)
+        if use_ffn:
+            self.ln_ffn = nn.LayerNorm(input_dim)
+            self.ffn = nn.Sequential(
+                nn.Linear(input_dim, input_dim * 4),
+                nn.GELU(),
+                nn.Dropout(ffn_dropout),
+                nn.Linear(input_dim * 4, input_dim),
+            )
+            self.drop_ffn = nn.Dropout(ffn_dropout)
+
+        # Shared up-projection applied per token: (input_dim -> internal_dim -> output_dim)
         self.shared_mlp = nn.Sequential(
             nn.Linear(input_dim, internal_dim),
             nn.GELU(),
-            nn.Linear(internal_dim, output_dim)
+            nn.Dropout(ffn_dropout),
+            nn.Linear(internal_dim, output_dim),
         )
 
+        # Final normalization in decoder embed space
+        self.out_ln = nn.LayerNorm(output_dim)
+
     def forward(self, z):
-        batch_size = z.shape[0]
+        b = z.size(0)
 
-        # Step 1: Expand latent code into a sequence of small vectors
-        # z: (Batch, input_dim) -> (Batch, num_tokens * input_dim)
-        sequence = self.feature_expander(z)
-        # Reshape to (Batch, num_tokens, input_dim)
-        sequence = sequence.view(batch_size, self.num_tokens, -1)
+        # (B, input_dim) -> (B, num_tokens, input_dim)
+        seq = self.feature_expander(z).view(b, self.num_tokens, -1)
+        seq = seq + self.pos_embed
 
-        # Step 2: Add Positional Embeddings
-        sequence = sequence + self.pos_embed
+        # Self-attention (pre-norm)
+        x = self.ln_attn(seq)
+        attn_out, _ = self.attn(x, x, x, need_weights=False)
+        seq = seq + self.drop_attn(attn_out)
 
-        # Step 3: Project up to decoder dimension
-        # The MLP is applied to each of the num_tokens tokens, sharing weights
-        soft_prompts = self.shared_mlp(sequence)
+        # Optional FFN (pre-norm)
+        if self.use_ffn:
+            x = self.ln_ffn(seq)
+            seq = seq + self.drop_ffn(self.ffn(x))
 
-        # Output shape: (Batch, num_tokens, output_dim)
+        # Up-project to (B, num_tokens, output_dim)
+        soft_prompts = self.shared_mlp(seq)
+
+        # Scale + normalize to avoid overly large prefix activations
+        soft_prompts = self.out_ln(self.scale * soft_prompts)
         return soft_prompts
 
 

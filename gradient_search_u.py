@@ -161,6 +161,12 @@ def load_mapper(mapper_path: str, decoder_model, device: str = "cuda"):
         num_tokens = checkpoint.get('num_tokens')
         internal_dim = checkpoint.get('internal_dim')
         mapper_type = checkpoint.get('mapper_type', None)
+        # Additional LowRankMapper parameters
+        attn_heads = checkpoint.get('attn_heads', 2)
+        attn_dropout = checkpoint.get('attn_dropout', 0.1)
+        ffn_dropout = checkpoint.get('ffn_dropout', 0.1)
+        scale = checkpoint.get('scale', 0.1)
+        use_ffn = checkpoint.get('use_ffn', True)
     else:
         state_dict = checkpoint
         input_dim = None
@@ -168,6 +174,11 @@ def load_mapper(mapper_path: str, decoder_model, device: str = "cuda"):
         num_tokens = None
         internal_dim = None
         mapper_type = None
+        attn_heads = 2
+        attn_dropout = 0.1
+        ffn_dropout = 0.1
+        scale = 0.1
+        use_ffn = True
 
     # Handle torch.compile() prefix
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
@@ -190,18 +201,43 @@ def load_mapper(mapper_path: str, decoder_model, device: str = "cuda"):
         if input_dim is None:
             input_dim = state_dict['feature_expander.weight'].shape[1]
         if output_dim is None:
-            output_dim = state_dict['shared_mlp.2.weight'].shape[0]
+            # Handle both old (index 2) and new (index 3 with dropout) shared_mlp
+            if 'shared_mlp.3.weight' in state_dict:
+                output_dim = state_dict['shared_mlp.3.weight'].shape[0]
+            else:
+                output_dim = state_dict['shared_mlp.2.weight'].shape[0]
         if num_tokens is None:
             num_tokens = state_dict['pos_embed'].shape[1]
         if internal_dim is None:
             internal_dim = state_dict['shared_mlp.0.weight'].shape[0]
 
+        # Detect if attention-based (has ln_attn)
+        has_attention = 'ln_attn.weight' in state_dict
+        if has_attention:
+            # Infer attn_heads from attention weight shape
+            attn_embed_dim = state_dict['attn.in_proj_weight'].shape[1]
+            # use_ffn detection
+            use_ffn = 'ln_ffn.weight' in state_dict
+
         print(f"  Input dim: {input_dim}")
         print(f"  Output dim: {output_dim}")
         print(f"  Num tokens: {num_tokens}")
         print(f"  Internal dim: {internal_dim}")
+        if has_attention:
+            print(f"  Has attention: True")
+            print(f"  Use FFN: {use_ffn}")
 
-        mapper_model = LowRankMapper(input_dim, output_dim, num_tokens, internal_dim)
+        mapper_model = LowRankMapper(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            num_tokens=num_tokens,
+            internal_dim=internal_dim,
+            attn_heads=attn_heads,
+            attn_dropout=attn_dropout,
+            ffn_dropout=ffn_dropout,
+            scale=scale,
+            use_ffn=use_ffn
+        )
 
     else:  # OriginalMapper
         if input_dim is None:

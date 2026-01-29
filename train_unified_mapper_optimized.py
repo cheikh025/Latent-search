@@ -604,15 +604,27 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
     input_dim = embeddings.shape[1]
     output_dim = decoder_model.config.hidden_size
     num_tokens = 16
-    internal_dim = 512  # LowRankMapper internal dimension
 
-    # Use LowRankMapper for better parameter efficiency on smaller datasets
-    # For ~4600 samples, LowRankMapper (~1.6M params) is safer than OriginalMapper (~40M+ params)
+    # LowRankMapper hyperparameters
+    internal_dim = 512       # Hidden dimension in shared MLP
+    attn_heads = 2           # Number of attention heads
+    attn_dropout = 0.1       # Attention dropout
+    ffn_dropout = 0.1        # FFN and shared MLP dropout
+    scale = 0.1              # Output scaling factor
+    use_ffn = True           # Include FFN block after attention
+
+    # Use LowRankMapper with attention for better parameter efficiency on smaller datasets
+    # For ~4600 samples, LowRankMapper (~1.8M params) is safer than OriginalMapper (~40M+ params)
     mapper_model = LowRankMapper(
         input_dim=input_dim,
         output_dim=output_dim,
         num_tokens=num_tokens,
-        internal_dim=internal_dim
+        internal_dim=internal_dim,
+        attn_heads=attn_heads,
+        attn_dropout=attn_dropout,
+        ffn_dropout=ffn_dropout,
+        scale=scale,
+        use_ffn=use_ffn
     )
     mapper_type = 'LowRankMapper'
 
@@ -625,6 +637,9 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
     print(f"  Input: {input_dim}D (code embeddings)")
     print(f"  Output: {num_tokens} tokens x {output_dim}D (soft prompts)")
     print(f"  Internal dim: {internal_dim}")
+    print(f"  Attention heads: {attn_heads}")
+    print(f"  Scale: {scale}")
+    print(f"  Use FFN: {use_ffn}")
     print(f"  Parameters: {num_params:,}")
     print(f"  torch.compile: enabled (default mode)\n")
 
@@ -702,6 +717,11 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
         'num_tokens': num_tokens,
         'internal_dim': internal_dim,
         'mapper_type': mapper_type,
+        'attn_heads': attn_heads,
+        'attn_dropout': attn_dropout,
+        'ffn_dropout': ffn_dropout,
+        'scale': scale,
+        'use_ffn': use_ffn,
         'tasks_trained': list(TASK_PROMPTS.keys()),
         'total_programs': len(unified_df),
         'programs_per_task': task_counts,
@@ -738,6 +758,11 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
         'num_tokens': num_tokens,
         'internal_dim': internal_dim,
         'mapper_type': mapper_type,
+        'attn_heads': attn_heads,
+        'attn_dropout': attn_dropout,
+        'ffn_dropout': ffn_dropout,
+        'scale': scale,
+        'use_ffn': use_ffn,
         'tasks_trained': list(TASK_PROMPTS.keys()),
         'encoder_model': encoder_name,
         'decoder_model': decoder_name,
