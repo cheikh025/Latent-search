@@ -718,6 +718,7 @@ def gradient_search_pipeline(
     temperature: float = 0.7,
     encoder_name: str = None,
     decoder_name: str = None,
+    embedding_dim: int = None,
     device: str = "cuda",
     output_dir: str = "gradient_search_results",
     num_evaluators: int = 4,
@@ -800,7 +801,7 @@ def gradient_search_pipeline(
 
     # Load encoder ONCE (for encoding existing heuristics and new programs)
     print(f"Loading encoder ({encoder_name})...")
-    encoder_model, embedding_dim = get_encoder_model(device, encoder_name, getattr(args, 'embedding_dim', None))
+    encoder_model, actual_embedding_dim = get_encoder_model(device, encoder_name, embedding_dim)
     print(f"Embedding dimension: {embedding_dim}")
 
     # Load evaluator
@@ -1230,6 +1231,7 @@ def main():
         temperature=args.temperature,
         encoder_name=args.encoder,
         decoder_name=args.decoder,
+        embedding_dim=getattr(args, 'embedding_dim', None),
         device=args.device,
         output_dir=args.output_dir,
         num_evaluators=args.num_evaluators,
