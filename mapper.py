@@ -6,13 +6,20 @@ import torch.nn.functional as F
 import random
 from torch.nn.utils.rnn import pad_sequence
 
-class Mapper(nn.Module):
+class OriginalMapper(nn.Module):
     """
-    An MLP to map a latent vector z to a sequence of soft prompt vectors.
+    Original MLP mapper: maps a latent vector z to a sequence of soft prompt vectors.
+
+    This is the original high-capacity mapper. For smaller datasets, consider using
+    LowRankMapper instead.
+
+    Architecture: input_dim -> output_dim -> output_dim -> output_dim * num_tokens
+    Parameter count: ~O(output_dim^2 * num_tokens) - can be large for high output_dim
     """
     def __init__(self, input_dim, output_dim, num_tokens):
         super().__init__()
         self.num_tokens = num_tokens
+        self.output_dim = output_dim
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, output_dim),
             nn.GELU(),
@@ -26,6 +33,76 @@ class Mapper(nn.Module):
         mapped_z = self.mlp(z)
         # Reshape to create a sequence of vectors
         return mapped_z.view(batch_size, self.num_tokens, -1)
+
+
+class LowRankMapper(nn.Module):
+    """
+    Low-rank mapper with weight sharing for parameter efficiency.
+
+    This mapper is designed for smaller datasets where the original Mapper
+    would have too many parameters and risk overfitting.
+
+    Architecture:
+    1. Feature expander: z -> (num_tokens * input_dim) - creates token-specific features
+    2. Positional embeddings: learnable position information for each token
+    3. Shared MLP: applied to each token independently (weight sharing)
+
+    Parameter count: ~O(num_tokens * input_dim + internal_dim * output_dim)
+    For input_dim=128, output_dim=2560, num_tokens=16, internal_dim=512:
+    ~1.6M parameters (vs ~40M+ for original mapper)
+
+    Args:
+        input_dim: Dimension of input latent vector z
+        output_dim: Dimension of output soft prompt vectors (decoder hidden size)
+        num_tokens: Number of soft prompt tokens to generate
+        internal_dim: Hidden dimension in the shared MLP (controls capacity)
+    """
+    def __init__(self, input_dim=128, output_dim=2560, num_tokens=16, internal_dim=512):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.output_dim = output_dim
+        self.input_dim = input_dim
+        self.internal_dim = internal_dim
+
+        # 1. Expand z from (Batch, input_dim) -> (Batch, num_tokens, input_dim)
+        # We learn a unique projection for each token position from the latent z
+        self.feature_expander = nn.Linear(input_dim, num_tokens * input_dim)
+
+        # 2. Positional Information
+        # Helps the mapper know which token comes first, second, etc.
+        self.pos_embed = nn.Parameter(torch.randn(1, num_tokens, input_dim) * 0.02)
+
+        # 3. Shared Up-Projection MLP
+        # This same MLP is applied to every token independently (Weight Sharing)
+        self.shared_mlp = nn.Sequential(
+            nn.Linear(input_dim, internal_dim),
+            nn.GELU(),
+            nn.Linear(internal_dim, output_dim)
+        )
+
+    def forward(self, z):
+        batch_size = z.shape[0]
+
+        # Step 1: Expand latent code into a sequence of small vectors
+        # z: (Batch, input_dim) -> (Batch, num_tokens * input_dim)
+        sequence = self.feature_expander(z)
+        # Reshape to (Batch, num_tokens, input_dim)
+        sequence = sequence.view(batch_size, self.num_tokens, -1)
+
+        # Step 2: Add Positional Embeddings
+        sequence = sequence + self.pos_embed
+
+        # Step 3: Project up to decoder dimension
+        # The MLP is applied to each of the num_tokens tokens, sharing weights
+        soft_prompts = self.shared_mlp(sequence)
+
+        # Output shape: (Batch, num_tokens, output_dim)
+        return soft_prompts
+
+
+# Default Mapper - use LowRankMapper for better parameter efficiency
+# Change this alias to switch the default mapper used throughout the codebase
+Mapper = LowRankMapper
     
 
 def get_mapper_training_data(df):

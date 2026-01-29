@@ -33,7 +33,7 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 
-from mapper import Mapper
+from mapper import Mapper, LowRankMapper, OriginalMapper
 from utils import is_valid_python
 from model_config import DEFAULT_ENCODER, DEFAULT_DECODER, DEFAULT_MATRYOSHKA_DIM
 from load_encoder_decoder import load_encoder
@@ -483,6 +483,8 @@ def train_unified_mapper_optimized(
             }
             if scheduler is not None:
                 checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+            # Note: mapper_type and internal_dim will be added in final checkpoint
+            # These intermediate checkpoints are for resume only
             torch.save(checkpoint_data, checkpoint_path)
             if verbose:
                 print(f"  Checkpoint saved: {checkpoint_path}")
@@ -591,32 +593,38 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
     print("Decoder loaded with Flash Attention 2 + Gradient Checkpointing\n")
 
     # ========================================================================
-    # Step 5: Initialize Mapper
+    # Step 5: Initialize Mapper (LowRankMapper for parameter efficiency)
     # ========================================================================
 
     print(f"{'='*70}")
-    print("Initializing Mapper")
+    print("Initializing Mapper (LowRankMapper)")
     print(f"{'='*70}\n")
 
     embeddings = np.stack(unified_df['z'].values)
     input_dim = embeddings.shape[1]
     output_dim = decoder_model.config.hidden_size
     num_tokens = 16
+    internal_dim = 512  # LowRankMapper internal dimension
 
-    mapper_model = Mapper(
+    # Use LowRankMapper for better parameter efficiency on smaller datasets
+    # For ~4600 samples, LowRankMapper (~1.6M params) is safer than OriginalMapper (~40M+ params)
+    mapper_model = LowRankMapper(
         input_dim=input_dim,
         output_dim=output_dim,
-        num_tokens=num_tokens
+        num_tokens=num_tokens,
+        internal_dim=internal_dim
     )
+    mapper_type = 'LowRankMapper'
 
     # Note: torch.compile with "reduce-overhead" uses CUDA graphs which conflict
     # with gradient checkpointing. Use "default" mode instead for compatibility.
     mapper_model = torch.compile(mapper_model, mode="default")
 
     num_params = sum(p.numel() for p in mapper_model.parameters())
-    print(f"Mapper Architecture:")
+    print(f"Mapper Architecture ({mapper_type}):")
     print(f"  Input: {input_dim}D (code embeddings)")
     print(f"  Output: {num_tokens} tokens x {output_dim}D (soft prompts)")
+    print(f"  Internal dim: {internal_dim}")
     print(f"  Parameters: {num_params:,}")
     print(f"  torch.compile: enabled (default mode)\n")
 
@@ -692,6 +700,8 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
         'input_dim': input_dim,
         'output_dim': output_dim,
         'num_tokens': num_tokens,
+        'internal_dim': internal_dim,
+        'mapper_type': mapper_type,
         'tasks_trained': list(TASK_PROMPTS.keys()),
         'total_programs': len(unified_df),
         'programs_per_task': task_counts,
@@ -726,6 +736,8 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
         'input_dim': input_dim,
         'output_dim': output_dim,
         'num_tokens': num_tokens,
+        'internal_dim': internal_dim,
+        'mapper_type': mapper_type,
         'tasks_trained': list(TASK_PROMPTS.keys()),
         'encoder_model': encoder_name,
         'decoder_model': decoder_name,
@@ -741,6 +753,7 @@ def main(resume_checkpoint: Optional[str] = None, encoder_name: str = None, deco
     print("Training Summary:")
     print(f"  Total programs: {len(unified_df)}")
     print(f"  Tasks trained: {len(set(unified_df['task']))}")
+    print(f"  Mapper type: {mapper_type}")
     print(f"  Model parameters: {num_params:,}")
     print(f"  Encoder: {encoder_name}")
     print(f"  Decoder: {decoder_name}")
