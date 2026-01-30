@@ -320,16 +320,26 @@ def multi_start_gradient_search_u_with_z_predictor(
 
     # Get final scores using z-predictor
     with torch.no_grad():
-        final_scores = predictor(optimized_z).squeeze()
+        final_scores = predictor(optimized_z).squeeze(-1)  # Only squeeze last dim to keep [num_starts]
 
     if verbose:
         print(f"\nFinal scores (from z-predictor):")
-        print(f"  Min:  {final_scores.min().item():.4f}")
-        print(f"  Max:  {final_scores.max().item():.4f}")
-        print(f"  Mean: {final_scores.mean().item():.4f}")
+        if final_scores.dim() == 0:
+            # Handle single score case
+            print(f"  Score: {final_scores.item():.4f}")
+        else:
+            print(f"  Min:  {final_scores.min().item():.4f}")
+            print(f"  Max:  {final_scores.max().item():.4f}")
+            print(f"  Mean: {final_scores.mean().item():.4f}")
 
     # Sort by score (descending)
-    sorted_indices = torch.argsort(final_scores, descending=True)
+    # Ensure sorted_indices is 1D to preserve batch dimension when indexing
+    if final_scores.dim() == 0:
+        # Single score: no sorting needed, keep as 1D index
+        sorted_indices = torch.tensor([0], device=final_scores.device)
+    else:
+        sorted_indices = torch.argsort(final_scores, descending=True)
+
     optimized_z = optimized_z[sorted_indices]
 
     return optimized_z
