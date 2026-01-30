@@ -240,7 +240,7 @@ def plot_heatmap_hist2d(ax, x, y, scores=None, bins=120, cmap=None):
         cbar.ax.tick_params(labelsize=9)
 
 
-def plot_scatter(ax, x, y, scores, cmap=None, show_top_k=None, alpha=0.6):
+def plot_scatter(ax, x, y, scores, cmap=None, show_top_k=None, alpha=0.6, point_size=50):
     """
     Scatter plot showing individual heuristics colored by score.
 
@@ -254,7 +254,7 @@ def plot_scatter(ax, x, y, scores, cmap=None, show_top_k=None, alpha=0.6):
         x, y,
         c=scores,
         cmap=cmap,
-        s=50,
+        s=point_size,
         alpha=alpha,
         edgecolors='black',
         linewidths=0.3
@@ -280,7 +280,7 @@ def plot_scatter(ax, x, y, scores, cmap=None, show_top_k=None, alpha=0.6):
         ax.legend(loc='upper right', fontsize=10)
 
 
-def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5, cmap=None):
+def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5, cmap=None, point_size=60):
     """
     Combined: density background + scatter colored by score.
 
@@ -307,7 +307,7 @@ def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5, cma
         x, y,
         c=scores,
         cmap=cmap,
-        s=60,
+        s=point_size,
         alpha=alpha,
         edgecolors='black',
         linewidths=0.5,
@@ -350,6 +350,7 @@ def visualize_tsne(
     cmap: str = None,
     show_top_k: int = None,
     scatter_alpha: float = 0.6,
+    point_size: int = 100,
 ):
     """
     Visualize latent space to answer: "Do high-quality heuristics cluster in specific regions?"
@@ -373,6 +374,7 @@ def visualize_tsne(
         cmap: Custom colormap name
         show_top_k: Highlight top-k performers (e.g., 5 or 10)
         scatter_alpha: Transparency for scatter plots (0-1)
+        point_size: Size of scatter points (default: 100, higher = bigger points)
 
     Returns:
         Tuple of (z_2d, scores, names)
@@ -441,12 +443,12 @@ def visualize_tsne(
     if plot_kind == "combined":
         if scores is None:
             raise ValueError("'combined' plot requires --with_scores")
-        plot_combined(ax, x, y, scores, gridsize=gridsize, show_top_k=show_top_k, alpha=scatter_alpha, cmap=cmap)
+        plot_combined(ax, x, y, scores, gridsize=gridsize, show_top_k=show_top_k, alpha=scatter_alpha, cmap=cmap, point_size=point_size)
         subtitle = "Quality Regions"
     elif plot_kind == "scatter":
         if scores is None:
             raise ValueError("'scatter' plot requires --with_scores")
-        plot_scatter(ax, x, y, scores, cmap=cmap, show_top_k=show_top_k, alpha=scatter_alpha)
+        plot_scatter(ax, x, y, scores, cmap=cmap, show_top_k=show_top_k, alpha=scatter_alpha, point_size=point_size)
         subtitle = "Score Distribution"
     elif plot_kind == "hexbin":
         plot_heatmap_hexbin(ax, x, y, scores=scores, gridsize=gridsize, cmap=cmap)
@@ -517,6 +519,8 @@ def main():
                         help="Highlight top-k performers with special markers (e.g., 5 or 10)")
     parser.add_argument("--scatter_alpha", type=float, default=0.6,
                         help="Point transparency for scatter plots (0-1)")
+    parser.add_argument("--point_size", type=int, default=100,
+                        help="Size of scatter points (default: 100, higher = bigger)")
     parser.add_argument("--gridsize", type=int, default=70,
                         help="Hexbin grid resolution (higher = finer)")
     parser.add_argument("--hist_bins", type=int, default=120,
@@ -560,6 +564,7 @@ def main():
         cmap=args.cmap,
         show_top_k=args.show_top_k,
         scatter_alpha=args.scatter_alpha,
+        point_size=args.point_size,
     )
 
 
