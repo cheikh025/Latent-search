@@ -463,12 +463,12 @@ def visualize_tsne(
     ax.tick_params(labelsize=10)
 
     # Clean title
-    task_display = task_name.replace("_", " ").title()
-    ax.set_title(
-        f"{task_display} - {subtitle}",
-        fontsize=14,
-        pad=15
-    )
+    #task_display = task_name.replace("_", " ").title()
+    #ax.set_title(
+    #    f"{task_display} - {subtitle}",
+    #    fontsize=14,
+    #    pad=15
+    #)
 
     # Subtle grid
     ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.5)
