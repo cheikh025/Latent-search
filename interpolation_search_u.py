@@ -84,6 +84,48 @@ def load_heuristics(task_name: str) -> dict:
 
 
 # ============================================================================
+# Task Templates for LLM Initialization
+# ============================================================================
+
+def load_task_template(task_name: str):
+    """Load task template and description for LLM initialization."""
+    import importlib.util
+
+    template_path = os.path.join("task", task_name, "template.py")
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"Template not found: {template_path}")
+
+    spec = importlib.util.spec_from_file_location("template", template_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    return getattr(module, 'template_program', None), getattr(module, 'task_description', None)
+
+
+def create_init_prompt(task_description: str, template_program: str) -> str:
+    """Create prompt for LLM initialization."""
+    import re
+    func_match = re.search(r'def\s+\w+\([^)]*\)[^:]*:', template_program)
+    if func_match:
+        func_signature = template_program[func_match.start():].split('"""')[0] + '"""'
+        docstring_match = re.search(r'"""[\s\S]*?"""', template_program[func_match.start():])
+        if docstring_match:
+            func_signature = template_program[func_match.start():func_match.start() + docstring_match.end()]
+    else:
+        func_signature = template_program
+
+    prompt = f"""{task_description}
+
+Design a novel algorithm to solve this problem. Implement the following Python function:
+
+{func_signature}
+
+Provide only the complete Python function implementation, no explanations."""
+
+    return prompt
+
+
+# ============================================================================
 # Task-Specific Prompts
 # ============================================================================
 
@@ -404,6 +446,170 @@ def generate_code_from_z_batch(
 
 
 # ============================================================================
+# LLM Initialization
+# ============================================================================
+
+def generate_initial_programs_with_llm(
+    task_name: str,
+    num_programs: int,
+    decoder_model,
+    decoder_tokenizer,
+    encoder_model,
+    evaluator,
+    device: str = "cuda",
+    temperature: float = 0.8,
+    batch_size: int = 4,
+    verbose: bool = True
+) -> dict:
+    """
+    Generate initial search points using LLM with batched generation.
+
+    Args:
+        task_name: Task to generate programs for
+        num_programs: Number of initial programs to generate
+        decoder_model: Decoder LLM
+        decoder_tokenizer: Tokenizer
+        encoder_model: Encoder for embedding
+        evaluator: SecureEvaluator for scoring
+        device: Device to use
+        temperature: Sampling temperature (higher = more diverse)
+        batch_size: Batch size for generation
+        verbose: Print progress
+
+    Returns:
+        Dictionary: {code_hash: {'code', 'actual_score', 'embedding', 'source', 'iteration'}}
+    """
+    print(f"\n{'='*70}")
+    print(f"LLM Initialization: Generating {num_programs} Initial Programs")
+    print(f"{'='*70}\n")
+
+    # Load task template
+    template_program, task_description = load_task_template(task_name)
+    if template_program is None or task_description is None:
+        raise ValueError(f"Could not load template for task: {task_name}")
+
+    # Create prompt
+    init_prompt = create_init_prompt(task_description, template_program)
+    if verbose:
+        print(f"Initialization prompt:\n{init_prompt[:500]}...\n")
+
+    embed_layer = decoder_model.get_input_embeddings()
+    decoder_device = embed_layer.weight.device
+    dtype = embed_layer.weight.dtype
+
+    program_database = {}
+    generated_count = 0
+    valid_count = 0
+
+    total_attempts = num_programs * 3
+
+    print(f"Generating programs in batches (target: {num_programs}, batch_size: {batch_size})...")
+
+    # Prepare prompt
+    messages = [{"role": "user", "content": init_prompt}]
+    prompt_text = decoder_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    # Generate in batches
+    num_batches = (total_attempts + batch_size - 1) // batch_size
+
+    for batch_idx in tqdm(range(num_batches), desc="Generating batches"):
+        if valid_count >= num_programs:
+            break
+
+        current_batch_size = min(batch_size, total_attempts - batch_idx * batch_size)
+
+        try:
+            batch_prompts = [prompt_text] * current_batch_size
+
+            tokenized = decoder_tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=False
+            ).to(decoder_device)
+
+            with torch.no_grad():
+                generated_ids = decoder_model.generate(
+                    **tokenized,
+                    max_new_tokens=1024,
+                    temperature=temperature,
+                    top_p=0.95,
+                    do_sample=True,
+                    pad_token_id=decoder_tokenizer.pad_token_id,
+                    eos_token_id=decoder_tokenizer.eos_token_id
+                )
+
+            for i in range(current_batch_size):
+                generated_count += 1
+
+                raw_output = decoder_tokenizer.decode(generated_ids[i], skip_special_tokens=True)
+                clean_code = extract_python_code_robust(raw_output, include_preface=True)
+
+                if not clean_code or not is_valid_python(clean_code):
+                    continue
+
+                program = TextFunctionProgramConverter.text_to_program(clean_code)
+                if program is None or len(program.functions) == 0:
+                    continue
+
+                code_hash = hash(clean_code.strip())
+                if code_hash in program_database:
+                    continue
+
+                try:
+                    score = evaluator.evaluate_program(clean_code)
+                    if score is None or not np.isfinite(score):
+                        continue
+                except Exception:
+                    continue
+
+                with torch.no_grad():
+                    z_embedding = encoder_model.encode(
+                        [clean_code],
+                        convert_to_tensor=True,
+                        device=device,
+                        show_progress_bar=False
+                    )[0].float()
+
+                program_database[code_hash] = {
+                    'code': clean_code,
+                    'actual_score': float(score),
+                    'embedding': z_embedding,
+                    'source': 'llm_init',
+                    'iteration': -1
+                }
+
+                valid_count += 1
+
+                if verbose and valid_count % 5 == 0:
+                    print(f"  Generated {valid_count}/{num_programs} valid programs")
+
+                if valid_count >= num_programs:
+                    break
+
+        except Exception as e:
+            if verbose:
+                print(f"  Batch error: {e}")
+            continue
+
+    print(f"\n✓ LLM Initialization Complete:")
+    print(f"  Total attempts: {generated_count}")
+    print(f"  Valid programs: {valid_count}")
+
+    if valid_count > 0:
+        scores = [p['actual_score'] for p in program_database.values()]
+        print(f"  Best score: {max(scores):.4f}")
+        print(f"  Worst score: {min(scores):.4f}")
+        print(f"  Mean score: {np.mean(scores):.4f}")
+
+    return program_database
+
+
+# ============================================================================
 # Main Search Pipeline
 # ============================================================================
 
@@ -422,13 +628,15 @@ def interpolation_search_pipeline(
     output_dir: str = "interpolation_search_results",
     num_evaluators: int = 4,
     generation_batch_size: int = 4,
+    llm_init: bool = False,
+    llm_init_count: int = 20,
     verbose: bool = True
 ):
     """
     Interpolation-based search pipeline in u-space without predictor.
 
     Simpler than gradient search:
-    1. Load baselines and evaluate
+    1. Load baselines and evaluate (OR use LLM initialization)
     2. Each iteration: sample top-k, then for each search sample 2 parents and interpolate
     3. Generate and evaluate children
     4. Add successful programs to database
@@ -448,6 +656,8 @@ def interpolation_search_pipeline(
         output_dir: Directory to save results
         num_evaluators: Number of parallel evaluation workers
         generation_batch_size: Batch size for code generation
+        llm_init: If True, use LLM to generate initial programs instead of loading from JSON
+        llm_init_count: Number of programs to generate for LLM initialization (default: 20)
         verbose: Print progress
     """
 
@@ -469,6 +679,9 @@ def interpolation_search_pipeline(
     print(f"Decoder: {decoder_name}")
     print(f"Top-k pool size: {top_k_pool_size}")
     print(f"Searches per iteration: {num_searches_per_iter}")
+    print(f"Parallel evaluators: {num_evaluators}")
+    print(f"Generation batch size: {generation_batch_size}")
+    print(f"LLM initialization: {llm_init}" + (f" ({llm_init_count} programs)" if llm_init else ""))
     print()
 
     # Load models
@@ -495,77 +708,99 @@ def interpolation_search_pipeline(
     if skeleton_prompt is None:
         raise ValueError(f"No prompt defined for task: {task_name}")
 
-    # Load and evaluate baselines
-    print(f"\nLoading baseline heuristics from task/{task_name}/heuristics.json...")
-    heuristics = load_heuristics(task_name)
-    baseline_codes = list(heuristics.values())
-
-    if len(baseline_codes) == 0:
-        raise ValueError(f"No heuristics found")
-
-    print(f"  Loaded {len(baseline_codes)} baseline heuristics")
-
-    # Parallel evaluation of baselines
-    print(f"\nEvaluating baseline heuristics ({num_evaluators} workers)...")
-
-    def eval_baseline(idx_code):
-        idx, code = idx_code
-        try:
-            score = secure_eval.evaluate_program(code)
-            return idx, code, score, None
-        except Exception as e:
-            return idx, code, None, str(e)
+    # ===== Load and Evaluate Initial Programs =====
 
     program_database = {}
 
-    baseline_results = []
-    with ThreadPoolExecutor(max_workers=num_evaluators) as executor:
-        futures = {executor.submit(eval_baseline, (idx, code)): idx
-                   for idx, code in enumerate(baseline_codes)}
+    if llm_init:
+        # Use LLM to generate initial programs
+        program_database = generate_initial_programs_with_llm(
+            task_name=task_name,
+            num_programs=llm_init_count,
+            decoder_model=decoder_model,
+            decoder_tokenizer=decoder_tokenizer,
+            encoder_model=encoder_model,
+            evaluator=secure_eval,
+            device=device,
+            temperature=0.8,
+            batch_size=generation_batch_size,
+            verbose=verbose
+        )
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating baselines"):
-            baseline_results.append(future.result())
+        if len(program_database) == 0:
+            raise ValueError("LLM initialization failed - no valid programs generated!")
 
-    # Encode valid baselines
-    valid_baselines = [(idx, code, score) for idx, code, score, error in baseline_results
-                       if score is not None and np.isfinite(score)]
+    else:
+        # Load from JSON file
+        print(f"\nLoading baseline heuristics from task/{task_name}/heuristics.json...")
+        heuristics = load_heuristics(task_name)
+        baseline_codes = list(heuristics.values())
 
-    print(f"  Valid baselines: {len(valid_baselines)}/{len(baseline_codes)}")
-    print("  Encoding baselines...")
+        if len(baseline_codes) == 0:
+            raise ValueError(f"No heuristics found")
 
-    for idx, code, score in tqdm(valid_baselines, desc="Encoding"):
-        try:
-            with torch.no_grad():
-                z_embedding = encoder_model.encode(
-                    [code],
-                    convert_to_tensor=True,
-                    device=device,
-                    show_progress_bar=False
-                )[0].float()
+        print(f"  Loaded {len(baseline_codes)} baseline heuristics")
 
-            code_hash = hash(code.strip())
-            program_database[code_hash] = {
-                'code': code,
-                'actual_score': float(score),
-                'embedding': z_embedding,
-                'source': 'baseline',
-                'iteration': -1
-            }
+        # Parallel evaluation of baselines
+        print(f"\nEvaluating baseline heuristics ({num_evaluators} workers)...")
 
-        except Exception as e:
-            if verbose:
-                print(f"  Encoding error: {e}")
-            continue
+        def eval_baseline(idx_code):
+            idx, code = idx_code
+            try:
+                score = secure_eval.evaluate_program(code)
+                return idx, code, score, None
+            except Exception as e:
+                return idx, code, None, str(e)
 
-    if len(program_database) == 0:
-        raise ValueError("No valid baseline programs!")
+        baseline_results = []
+        with ThreadPoolExecutor(max_workers=num_evaluators) as executor:
+            futures = {executor.submit(eval_baseline, (idx, code)): idx
+                       for idx, code in enumerate(baseline_codes)}
+
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating baselines"):
+                baseline_results.append(future.result())
+
+        # Encode valid baselines
+        valid_baselines = [(idx, code, score) for idx, code, score, error in baseline_results
+                           if score is not None and np.isfinite(score)]
+
+        print(f"  Valid baselines: {len(valid_baselines)}/{len(baseline_codes)}")
+        print("  Encoding baselines...")
+
+        for idx, code, score in tqdm(valid_baselines, desc="Encoding"):
+            try:
+                with torch.no_grad():
+                    z_embedding = encoder_model.encode(
+                        [code],
+                        convert_to_tensor=True,
+                        device=device,
+                        show_progress_bar=False
+                    )[0].float()
+
+                code_hash = hash(code.strip())
+                program_database[code_hash] = {
+                    'code': code,
+                    'actual_score': float(score),
+                    'embedding': z_embedding,
+                    'source': 'baseline',
+                    'iteration': -1
+                }
+
+            except Exception as e:
+                if verbose:
+                    print(f"  Encoding error: {e}")
+                continue
+
+        if len(program_database) == 0:
+            raise ValueError("No valid baseline programs!")
 
     # Show statistics
     sorted_programs = sorted(program_database.values(), key=lambda x: x['actual_score'], reverse=True)
-    print(f"\n✓ Successfully initialized {len(program_database)} baseline programs")
-    print(f"  Best score: {sorted_programs[0]['actual_score']:.4f}")
-    print(f"  Worst score: {sorted_programs[-1]['actual_score']:.4f}")
-    print(f"  Mean score: {np.mean([p['actual_score'] for p in program_database.values()]):.4f}")
+    source_type = "LLM-generated" if llm_init else "baseline"
+    print(f"\n✓ Successfully initialized {len(program_database)} {source_type} programs")
+    print(f"  Best {source_type} score: {sorted_programs[0]['actual_score']:.4f}")
+    print(f"  Worst {source_type} score: {sorted_programs[-1]['actual_score']:.4f}")
+    print(f"  Mean {source_type} score: {np.mean([p['actual_score'] for p in program_database.values()]):.4f}")
 
     # Run search iterations
     all_results = []
@@ -789,6 +1024,10 @@ def main():
     parser.add_argument('--device', type=str, default='cuda', help='Device')
     parser.add_argument('--num_evaluators', type=int, default=4, help='Number of parallel evaluation workers')
     parser.add_argument('--generation_batch_size', type=int, default=4, help='Batch size for code generation')
+    parser.add_argument('--llm_init', action='store_true', default=False,
+                        help='Use LLM to generate initial programs instead of loading from JSON')
+    parser.add_argument('--llm_init_count', type=int, default=20,
+                        help='Number of programs to generate for LLM initialization (default: 20)')
 
     args = parser.parse_args()
 
@@ -807,6 +1046,8 @@ def main():
         output_dir=args.output_dir,
         num_evaluators=args.num_evaluators,
         generation_batch_size=args.generation_batch_size,
+        llm_init=args.llm_init,
+        llm_init_count=args.llm_init_count,
         verbose=True
     )
 
