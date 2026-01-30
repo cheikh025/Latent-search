@@ -162,9 +162,9 @@ def plot_heatmap_hexbin(ax, x, y, scores=None, gridsize=70, cmap=None):
       - If scores is None: density heatmap (log counts).
       - If scores is not None: mean score per bin.
     """
-    # Better default colormaps
+    # Default colormap
     if cmap is None:
-        cmap = "YlOrRd" if scores is None else "RdYlGn"
+        cmap = "viridis"
 
     if scores is None:
         hb = ax.hexbin(
@@ -201,9 +201,9 @@ def plot_heatmap_hist2d(ax, x, y, scores=None, bins=120, cmap=None):
       - If scores is None: density heatmap (log scale).
       - If scores is not None: mean score per bin.
     """
-    # Better default colormaps
+    # Default colormap
     if cmap is None:
-        cmap = "YlOrRd" if scores is None else "RdYlGn"
+        cmap = "viridis"
 
     if scores is None:
         H, xedges, yedges = np.histogram2d(x, y, bins=bins)
@@ -247,7 +247,7 @@ def plot_scatter(ax, x, y, scores, cmap=None, show_top_k=None, alpha=0.6):
     Directly shows: "Which regions contain high-quality heuristics?"
     """
     if cmap is None:
-        cmap = "RdYlGn"
+        cmap = "viridis"
 
     # Plot all points
     scatter = ax.scatter(
@@ -280,7 +280,7 @@ def plot_scatter(ax, x, y, scores, cmap=None, show_top_k=None, alpha=0.6):
         ax.legend(loc='upper right', fontsize=10)
 
 
-def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5):
+def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5, cmap=None):
     """
     Combined: density background + scatter colored by score.
 
@@ -288,6 +288,9 @@ def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5):
     - Gray background shows where heuristics are concentrated
     - Colored points show which regions have high scores
     """
+    if cmap is None:
+        cmap = "viridis"
+
     # Background: density heatmap
     hb = ax.hexbin(
         x, y,
@@ -303,7 +306,7 @@ def plot_combined(ax, x, y, scores, gridsize=70, show_top_k=None, alpha=0.5):
     scatter = ax.scatter(
         x, y,
         c=scores,
-        cmap="RdYlGn",
+        cmap=cmap,
         s=60,
         alpha=alpha,
         edgecolors='black',
@@ -438,7 +441,7 @@ def visualize_tsne(
     if plot_kind == "combined":
         if scores is None:
             raise ValueError("'combined' plot requires --with_scores")
-        plot_combined(ax, x, y, scores, gridsize=gridsize, show_top_k=show_top_k, alpha=scatter_alpha)
+        plot_combined(ax, x, y, scores, gridsize=gridsize, show_top_k=show_top_k, alpha=scatter_alpha, cmap=cmap)
         subtitle = "Quality Regions"
     elif plot_kind == "scatter":
         if scores is None:
@@ -518,7 +521,7 @@ def main():
                         help="Hexbin grid resolution (higher = finer)")
     parser.add_argument("--hist_bins", type=int, default=120,
                         help="Number of bins per axis for hist2d")
-    parser.add_argument("--cmap", type=str, default=None,
+    parser.add_argument("--cmap", type=str, default="viridis",
                         help="Matplotlib colormap name (e.g., viridis, plasma, RdYlGn)")
 
     # Output
