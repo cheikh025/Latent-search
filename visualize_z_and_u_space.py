@@ -8,7 +8,10 @@ Creates two side-by-side scatter plots:
 Both plots use viridis colormap and are colored by program scores.
 
 Usage:
-    python visualize_z_and_u_space.py --task tsp_construct --flow Flow_Checkpoints/unified_flow_final.pth
+    # Use default flow checkpoint
+    python visualize_z_and_u_space.py --task tsp_construct
+
+    # Specify custom flow checkpoint
     python visualize_z_and_u_space.py --task tsp_construct --flow my_flow.pth --perplexity 30 --show_top_k 10
 """
 
@@ -139,37 +142,27 @@ def load_flow(flow_path: str, device: str = "cuda") -> NormalizingFlow:
     """Load trained normalizing flow model."""
     print(f"Loading normalizing flow from {flow_path}...")
 
-    checkpoint = torch.load(flow_path, map_location=device)
+    checkpoint = torch.load(flow_path, map_location=device, weights_only=False)
 
-    # Extract model parameters from checkpoint
-    if 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-        dim = checkpoint.get('dim', checkpoint.get('embedding_dim', 768))
-        num_layers = checkpoint.get('num_layers', 8)
-        hidden_dim = checkpoint.get('hidden_dim', 512)
-    else:
-        # Old checkpoint format
-        state_dict = checkpoint
-        dim = 768
-        num_layers = 8
-        hidden_dim = 512
+    # Extract architecture parameters
+    dim = checkpoint.get('dim', checkpoint.get('embedding_dim', 768))
+    num_layers = checkpoint.get('num_layers', 4)  # Default to 4 for small datasets
+    hidden_dim = checkpoint.get('hidden_dim', 128)  # Default to 128 for small datasets
+    dropout = checkpoint.get('dropout', 0.0)  # Dropout will be disabled in eval mode
 
-    # Initialize flow model
-    flow = NormalizingFlow(
-        dim=dim,
-        num_layers=num_layers,
-        hidden_dim=hidden_dim
-    ).to(device)
+    print(f"  Dimension: {dim}")
+    print(f"  Layers: {num_layers}")
+    print(f"  Hidden dim: {hidden_dim}")
+    print(f"  Dropout: {dropout} (disabled in eval mode)")
 
-    # Load state dict
-    flow.load_state_dict(state_dict)
-    flow.eval()
+    # Create flow model with dropout (will be disabled in eval mode)
+    flow_model = NormalizingFlow(dim=dim, num_layers=num_layers, hidden_dim=hidden_dim, dropout=dropout)
+    flow_model.load_state_dict(checkpoint['model_state_dict'])
+    flow_model.to(device)
+    flow_model.eval()  # This disables dropout
 
-    print(f"  Flow dimension: {dim}")
-    print(f"  Number of layers: {num_layers}")
-    print(f"  Hidden dimension: {hidden_dim}")
-
-    return flow
+    print(f"  ✓ Flow loaded")
+    return flow_model
 
 
 def transform_z_to_u(z_embeddings: np.ndarray, flow_model: NormalizingFlow, device: str = "cuda") -> np.ndarray:
@@ -396,10 +389,10 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # Required arguments
+    # Task and flow arguments
     parser.add_argument("--task", type=str, default="tsp_construct",
                         help="Task name (e.g., tsp_construct, cvrp_construct)")
-    parser.add_argument("--flow", type=str, required=True,
+    parser.add_argument("--flow", type=str, default="Flow_Checkpoints/unified_flow_final.pth",
                         help="Path to trained normalizing flow checkpoint")
 
     # Model configuration
