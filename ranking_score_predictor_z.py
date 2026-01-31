@@ -78,7 +78,7 @@ class RankingScorePredictor(nn.Module):
 
 def load_heuristics(task_name: str) -> Dict[str, str]:
     """Load heuristics from JSON file for a given task."""
-    heuristics_path = Path(f"task/{task_name}/heuristics.json")
+    heuristics_path = Path(f"task/{task_name}/augmented.json")
 
     if not heuristics_path.exists():
         raise FileNotFoundError(f"Heuristics file not found: {heuristics_path}")
@@ -405,7 +405,7 @@ def compute_ranking_metrics(
 
     # Predict scores
     with torch.no_grad():
-        predicted = predictor(z_subset).squeeze().cpu().numpy()
+        predicted = predictor(z_subset).squeeze(-1).cpu().numpy()  # Only squeeze last dim
 
     # Spearman's rank correlation
     spearman_rho, spearman_p = spearmanr(actual_subset, predicted)
@@ -522,8 +522,8 @@ def train_ranking_predictor(
 
             optimizer.zero_grad()
 
-            score_better = predictor(z_better).squeeze()
-            score_worse = predictor(z_worse).squeeze()
+            score_better = predictor(z_better).squeeze(-1)  # Only squeeze last dim to preserve batch
+            score_worse = predictor(z_worse).squeeze(-1)
 
             loss = criterion(score_better, score_worse)
             loss.backward()
@@ -533,7 +533,7 @@ def train_ranking_predictor(
 
             train_loss += loss.item()
             train_correct += (score_better > score_worse).sum().item()
-            train_total += len(score_better)
+            train_total += score_better.numel()  # Use numel() instead of len() for compatibility
 
         avg_train_loss = train_loss / max(len(train_loader), 1)
         train_pair_acc = train_correct / max(train_total, 1)
@@ -549,14 +549,14 @@ def train_ranking_predictor(
                 z_better = z_better.to(device)
                 z_worse = z_worse.to(device)
 
-                score_better = predictor(z_better).squeeze()
-                score_worse = predictor(z_worse).squeeze()
+                score_better = predictor(z_better).squeeze(-1)  # Only squeeze last dim to preserve batch
+                score_worse = predictor(z_worse).squeeze(-1)
 
                 loss = criterion(score_better, score_worse)
                 val_loss += loss.item()
 
                 val_correct += (score_better > score_worse).sum().item()
-                val_total += len(score_better)
+                val_total += score_better.numel()  # Use numel() instead of len() for compatibility
 
         avg_val_loss = val_loss / max(len(val_loader), 1)
         val_pair_acc = val_correct / max(val_total, 1)

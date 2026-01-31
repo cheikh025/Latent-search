@@ -83,7 +83,7 @@ class RankingScorePredictor(nn.Module):
 
 def load_heuristics(task_name: str) -> Dict[str, str]:
     """Load heuristics from JSON file for a given task."""
-    heuristics_path = Path(f"task/{task_name}/heuristics.json")
+    heuristics_path = Path(f"task/{task_name}/augmented.json")
 
     if not heuristics_path.exists():
         raise FileNotFoundError(f"Heuristics file not found: {heuristics_path}")
@@ -428,7 +428,7 @@ def compute_ranking_metrics(
 
     # Predict scores
     with torch.no_grad():
-        predicted = predictor(u_subset).squeeze().cpu().numpy()
+        predicted = predictor(u_subset).squeeze(-1).cpu().numpy()  # Only squeeze last dim
 
     # Spearman's rank correlation
     spearman_rho, spearman_p = spearmanr(actual_subset, predicted)
