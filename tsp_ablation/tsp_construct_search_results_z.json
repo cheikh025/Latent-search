@@ -1,0 +1,429 @@
+[
+  {
+    "program_id": "iter16_idx4",
+    "iteration": 16,
+    "score": -6.567232442996065,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    step_dist = distance_matrix[current_node, candidates]\n\n    # Normalized distances\n    total_dist = np.sum(distance_matrix[np.ix_(candidates, candidates)], axis=1)\n    norm_step = step_dist / (np.clip(total_dist, 1e-12, None) + 1e-12)\n\n    # Weighted sum of step and total distances\n    weight = 0.6\n    score = weight * norm_step + (1.0 - weight) * (total_dist / (np.clip(total_dist, 1e-12, None) + 1e-12))\n\n    # Deterministic noise\n    noise = 1e-6 * np.arange(candidates.size)\n    score += noise\n\n    # Softmin to avoid deterministic tie\u2011breaking\n    exp_score = np.exp(-score / (np.mean(score) + 1e-12))\n    probs = exp_score / (np.sum(exp_score) + 1e-12)\n\n    # Pick the index with highest probability\n    chosen_idx = int(np.argmax(probs))\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter5_idx2",
+    "iteration": 5,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Step 1: Determine the distance to the destination from each unvisited node\n    d_to_dest = distance_matrix[current_node, unvisited_nodes]\n    # Step 2: Compute the geometric median of all distances to unvisited nodes\n    median_dist = np.median(distance_matrix[np.arange(current_node, current_node + 1), unvisited_nodes])\n\n    # Step 3: Normalize distances for comparison\n    norm_d_to_dest = d_to_dest / (np.max(d_to_dest) + 1e-12)\n    norm_median = median_dist / (np.max(median_dist) + 1e-12)\n\n    # Step 4: Compute a weighted score for each unvisited node\n    weight = 0.7\n    score = norm_d_to_dest * weight + norm_median * (1.0 - weight)\n\n    # Step 5: Select the node with the minimum score\n    best_node_idx = int(unvisited_nodes[np.argmin(score)])\n    return int(best_node_idx)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter7_idx3",
+    "iteration": 7,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    D = distance_matrix\n\n    d_cur = D[current_node, cand]\n    d_dst = D[cand, destination_node]\n    d_pair = D[cand, cand]\n\n    # Geometric mean of distances\n    mean_d = np.mean(d_cur + d_dst + d_pair)\n    denom = 1e-9\n    ratio = (d_cur + d_dst) / (mean_d + denom)\n\n    # Add a small perturbation\n    noise = np.random.uniform(0.0, 1e-6, size=d_pair.shape)\n    ratio = np.clip(ratio + noise, 0, np.inf)\n\n    # Choose the k smallest ratio values\n    k = 10\n    if k >= len(ratio):\n        k = len(ratio) - 1\n    top_k = np.partition(ratio, k)[:k]\n    chosen = cand[np.argmin(top_k)]\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter9_idx4",
+    "iteration": 9,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n    dist = distance_matrix[np.ix_(unv, unv)].copy()\n\n    # Use a deterministic random seed for tie\u2011breaking\n    rng = np.random.default_rng(42)\n    row_idx = rng.choice(unv.size)\n    col_idx = rng.choice(unv.size)\n\n    # Normalize and clip for stability\n    step = np.clip(step, 0, np.inf)\n    dist = np.clip(dist, 0, np.inf)\n\n    # Compute normalized distances\n    norm_step = step / (np.mean(step) + 1e-12)\n    norm_dist = dist / (np.mean(dist) + 1e-12)\n\n    # Compute a weighted sum with a small epsilon to avoid division by zero\n    weight = 0.7 * norm_step + 0.3 * norm_dist\n    weight = np.clip(weight, 0, np.inf)\n\n    # Add deterministic noise\n    noise = np.abs(unv - np.median(unv)) * 1e-6\n    weight += noise\n\n    # Find the index with the minimum weighted distance\n    idx = int(np.argmin(weight))\n    return int(unv[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter10_idx1",
+    "iteration": 10,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename variables for clarity\n    cand = unvisited_nodes.astype(int)\n\n    # Distance matrix to current node\n    d_curr = distance_matrix[current_node, cand]\n\n    # Distance matrix to destination node\n    d_dest = distance_matrix[cand, destination_node]\n\n    # Step size: a small positive value\n    step = 1e-6\n\n    # Compute the weighted sum\n    score = d_curr + step * (d_dest / (np.sum(d_dest) + 1e-12))\n    score = np.clip(score, 0, None)\n\n    # Add deterministic noise to avoid deterministic tie\u2011breaking\n    noise = np.random.uniform(0, 1e-6, size=score.shape)\n    score += noise\n\n    return int(cand[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter11_idx1",
+    "iteration": 11,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n\n    d_dest = distance_matrix[cand, destination_node]\n    D = np.mean(d_dest)\n    sigma = np.std(d_dest) + 1e-12\n\n    score = (step / (D + 1e-12)) + 0.1 * (step / (sigma + 1e-12))\n    score = np.clip(score, 0, None)\n\n    # deterministic noise for tie\u2011breaking\n    noise = np.arange(score.size) * 1e-6\n    score += noise\n\n    # deterministic noise for tie\u2011breaking\n    return int(cand[int(np.argmin(score))])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter12_idx2",
+    "iteration": 12,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, candidates]\n\n    # Use median instead of mean to reduce noise\n    median_dist = np.median(distance_matrix[np.ix_(candidates, candidates)])\n\n    # Determine a target distance for the final step\n    final_dist = median_dist * 1.5\n\n    # Use a weighted sum to balance proximity and step size\n    score = 0.7 * step + 0.3 * np.abs(step - final_dist)\n\n    # Add deterministic noise for tie\u2011breaking\n    noise = np.arange(len(score)) * 1e-9\n    score += noise\n\n    # Choose the candidate with the minimum score\n    return int(candidates[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter17_idx3",
+    "iteration": 17,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n    n = unv.size\n    best = int(unv[0])\n    score = 0.0\n\n    for j in range(1, n):\n        d = distance_matrix[unv[j], unv[0]]\n        if d <= step[j]:\n            score += d\n        else:\n            score += 1.0 * (d / step[j])\n        if score > 1.0:\n            break\n        best = int(unv[j])\n    score = np.clip(score, 0.0, 5.0)\n\n    # deterministic noise for tie\u2011breaking\n    noise = 1e-6 * np.arange(n)\n    scores = step + noise\n    idx = np.argmin(scores)\n    if idx < 0:\n        return int(best)\n\n    return int(unv[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter19_idx4",
+    "iteration": 19,
+    "score": -6.8239686184057184,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    dist_mat = distance_matrix\n    unv = unvisited_nodes.astype(int)\n    step = int(unv.size)\n\n    if step <= 1:\n        return int(unv[0]) if unv.size > 0 else int(current_node)\n\n    # nearest neighbour candidate\n    cand = np.argmin(dist_mat[current_node, unv])\n    d_cand = dist_mat[current_node, unv[cand]]\n    d_dest = dist_mat[unv[cand], destination_node]\n\n    # score components\n    score = (d_cand / (np.max(dist_mat) + 1e-12)) + (d_dest / (np.max(dist_mat) + 1e-12))\n    score += 0.5 * (np.std(dist_mat[current_node, unv]) / (np.std(dist_mat) + 1e-12))\n\n    # deterministic choice with noise\n    noise = 1e-8 * np.arange(step)\n    score += noise\n\n    # deterministic selection\n    idx = np.argmin(score)\n    return int(unv[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter9_idx0",
+    "iteration": 9,
+    "score": -7.137274136328029,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, cand]\n    d_dest = distance_matrix[cand, destination_node]\n\n    n_total = distance_matrix.shape[0]\n    n_rem = cand.size\n    progress = 1.0 - (n_rem / max(1, n_total)) + 1e-12\n\n    # Deterministic noise to break ties\n    noise = np.arange(cand.size) * 1e-8\n    d_cur += noise\n    d_dest += noise\n\n    # Weighted score\n    score = d_cur + 0.35 * d_dest + 0.65 * progress\n\n    # Clipping for stability\n    score = np.clip(score, 0, 1e12)\n\n    # Deterministic choice via argmin\n    idx = int(np.argmin(score))\n    return int(cand[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter8_idx3",
+    "iteration": 8,
+    "score": -7.138831097523688,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, unv]\n    d_dest = distance_matrix[unv, destination_node]\n\n    n = int(unv.size)\n    if n == 1:\n        return int(unv[0])\n\n    d_step = d_cur\n    d_pair = d_dest\n\n    if n <= 4:\n        s = 0.25\n    else:\n        s = 0.45\n\n    # Add a small epsilon to avoid division by zero\n    eps = 1e-12\n    step_norm = d_step / (np.mean(d_step) + eps)\n    pair_norm = d_pair / (np.mean(d_pair) + eps)\n\n    # Normalize by the total distance between unvisited nodes\n    total_dist = np.sum(distance_matrix[unv, unv])\n    if total_dist > 0:\n        step_norm = step_norm / (total_dist + eps)\n        pair_norm = pair_norm / (total_dist + eps)\n\n    # Weighted combination with a fixed ratio\n    score = 0.7 * step_norm + 0.3 * pair_norm\n    score = np.clip(score, 0, np.inf)\n\n    # Add deterministic noise for tie\u2011breaking\n    noise = np.arange(unv.size) * 1e-8\n    score += noise\n\n    # Choose the node with the minimal score\n    best_idx = np.argmin(score)\n    return int(unv[best_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter2_idx3",
+    "iteration": 2,
+    "score": -7.147902945457744,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n\n    D = distance_matrix[np.ix_(cand, cand)].copy()\n    np.fill_diagonal(D, np.inf)\n\n    # Use the median of the distances from each candidate to the rest of the cluster\n    cluster_med = np.median(D, axis=1)\n\n    # Normalised distance: scaled by the max distance and the sum of distances\n    step_norm = step / (np.max(step) + 1e-12)\n    dist_norm = (step_norm + 1e-12) / (np.sum(step_norm) + 1e-12)\n    score = (step_norm + 0.2 * cluster_med) / (np.sum(step_norm) + 1e-12)\n\n    # Deterministic noise for tie\u2011breaking\n    noise = np.arange(cand.size) * 1e-6\n    score += noise\n\n    # Choose the top k candidates (k=3) by score\n    top_k = np.argsort(score)[:3]\n    return int(cand[top_k[np.argmin(score[top_k])]])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter13_idx0",
+    "iteration": 13,
+    "score": -7.148101245092354,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    d_curr = dist_mat[current_node, candidates]\n    d_dest = dist_mat[candidates, destination_node]\n\n    # Determine the median of the distances\n    median_dist = np.median(d_curr)\n\n    # Scale the distances using a logarithmic transformation\n    d_scaled = np.log(d_curr + 1e-12)\n    d_scaled = np.clip(d_scaled, -5.0, 5.0)\n\n    # Determine the median of the scaled distances\n    median_scaled = np.median(d_scaled)\n\n    # Compute a weighted sum of the scaled distances\n    score = 0.75 * d_scaled + 0.25 * (d_dest / median_dist)\n\n    # Add a small deterministic noise to avoid deterministic selection\n    noise = np.random.uniform(0.0, 1e-6, size=score.shape)\n    score += noise\n\n    # Select the node with the smallest score\n    best_idx = int(np.argmin(score))\n    return int(candidates[best_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter5_idx1",
+    "iteration": 5,
+    "score": -7.16946260960106,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, unv]\n    d_dst = distance_matrix[unv, destination_node]\n    d_pair = d_cur + d_dst\n\n    step = d_cur / (np.mean(d_cur) + 1e-12)\n    ratio = np.clip(d_pair / (np.mean(d_pair) + 1e-12), 0.0, 1.0)\n\n    # deterministic noise for tie\u2011breaking\n    noise = np.random.uniform(-1e-6, 1e-6, size=d_pair.shape)\n\n    score = 0.45 * step + 0.55 * ratio + 0.05 * noise\n    return int(unv[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter16_idx3",
+    "iteration": 16,
+    "score": -7.2228822986549694,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n\n    # Distance to destination\n    d_to_dest = distance_matrix[current_node, destination_node]\n\n    # Greedy distance from current node to each unvisited node\n    d_greedy = distance_matrix[current_node, unv]\n\n    # Distance to destination from unvisited nodes\n    d_to_unv = distance_matrix[unv, destination_node]\n\n    # Normalisation\n    d_greedy_norm = d_greedy / (np.max(d_greedy) + 1e-12)\n    d_to_unv_norm = d_to_unv / (np.max(d_to_unv) + 1e-12)\n\n    # Weighted sum\n    score = 0.8 * d_greedy_norm + 0.2 * d_to_unv_norm\n\n    # Deterministic tie\u2011breaking\n    idx = np.argmin(score)\n    if idx >= len(unv):\n        return int(unv[idx % len(unv)])\n    return int(unv[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter13_idx4",
+    "iteration": 13,
+    "score": -7.255129272187969,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Clipping to avoid infinite values in the distance matrix\n    dist_mat = distance_matrix\n    unv = unvisited_nodes.astype(int)\n\n    # Step size: distance from current to the next node\n    step = dist_mat[current_node, unv].copy()\n\n    # Target distance: distance from destination to the next node\n    target = dist_mat[destination_node, unv].copy()\n\n    # Pairwise distances between unvisited nodes\n    pairwise = dist_mat[np.ix_(unv, unv)].copy()\n\n    # Normalisation: using the median of the target distances\n    med_target = np.median(target)\n    if med_target == 0:\n        med_target = 1e-9\n\n    # Normalised step and target\n    step_norm = step / (med_target + 1e-12)\n    target_norm = target / (med_target + 1e-12)\n\n    # Score: combination of step and target, with a small random noise\n    score = 0.7 * step_norm + 0.3 * target_norm\n    noise = np.random.uniform(-1e-6, 1e-6, size=score.shape)\n    score += noise\n\n    # Deterministic selection: pick the node with the minimum score\n    return int(unv[int(np.argmin(score))])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter18_idx1",
+    "iteration": 18,
+    "score": -7.296526721658476,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n    dst = distance_matrix[cand, destination_node]\n\n    # Add small deterministic noise to break ties\n    noise = 1e-10 * np.arange(cand.size)\n    step += noise\n    dst += noise\n\n    # Normalise by total distances\n    total_dist = np.sum(distance_matrix[current_node, cand]) + 1e-12\n    step_norm = step / (total_dist + 1e-12)\n    dst_norm = dst / (total_dist + 1e-12)\n\n    # Weighted sum with a small bias towards larger distances\n    score = 0.7 * step_norm + 0.3 * dst_norm\n    score = np.clip(score, 0, 1)\n\n    # Deterministic noise for tie\u2011breaking\n    noise = np.random.uniform(0, 1e-8, size=score.shape)\n    score += noise\n\n    # Select the node with the lowest score\n    idx = np.argmin(score)\n    return int(cand[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter12_idx4",
+    "iteration": 12,
+    "score": -7.303570404420063,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    dist_mat = distance_matrix\n    n = unvisited_nodes.size\n    step = np.linalg.norm(unvisited_nodes - current_node)\n    cand = unvisited_nodes.astype(int)\n\n    if n <= 1:\n        return int(unvisited_nodes[0])\n\n    d_cand = dist_mat[current_node, cand]\n    d_pair = dist_mat[np.ix_(cand, cand)].copy()\n\n    # Use median of pairwise distances instead of mean\n    median_pair = np.median(d_pair, axis=1)\n    median_pair[np.isnan(median_pair)] = 0.0\n\n    # Normalized weighted score\n    score = 0.85 * (d_cand / (np.median(d_cand) + 1e-12)) + \\\n            0.15 * (median_pair / (np.median(median_pair) + 1e-12))\n    score[np.isinf(score)] = 0.0\n\n    # Deterministic noise for tie\u2011breaking\n    noise = 0.01 * np.arange(n) * np.sign(score)\n    score += noise\n\n    # Select the node with the lowest score\n    return int(cand[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter12_idx0",
+    "iteration": 12,
+    "score": -7.3845946210529885,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, cand]\n    d_des = distance_matrix[cand, destination_node]\n    d_pair = d_cur + d_des\n\n    n_total = distance_matrix.shape[0]\n    n_remaining = cand.size\n    progress = 1.0 - (n_remaining / max(1, n_total))\n\n    # Clamped progress to avoid very large values\n    progress = np.clip(progress, 0.0, 1.0)\n\n    # Add a small epsilon to avoid division by zero\n    epsilon = 1e-12\n    score = 0.5 * (d_pair / (progress + epsilon)) + 0.5 * (d_cur / (progress + epsilon))\n    score = np.clip(score, 0.0, 10.0)\n\n    # Deterministic tie\u2011breaking using the index\n    return int(cand[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter14_idx0",
+    "iteration": 14,
+    "score": -7.437402039917491,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename variables to avoid confusion\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n    dest = distance_matrix[cand, destination_node]\n\n    # Compute a scoring function\n    step_norm = step / (np.mean(step) + 1e-12)\n    dest_norm = dest / (np.mean(dest) + 1e-12)\n\n    # Normalize and apply a weighted combination\n    score = 0.6 * step_norm + 0.4 * dest_norm\n\n    # Introduce deterministic noise for tie\u2011breaking\n    noise = np.arange(len(score)) * 1e-6\n    score += noise\n\n    # Pick the node with the minimum score\n    return int(cand[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter13_idx3",
+    "iteration": 13,
+    "score": -7.521164023659783,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n\n    # Step 1: Compute pairwise distances between unvisited nodes\n    dists = distance_matrix[np.ix_(unv, unv)].copy()\n\n    # Step 2: Compute the average distance from each unvisited node to all others\n    avg_dists = np.mean(dists, axis=1)\n\n    # Step 3: Compute the normalized average distance from the current node\n    norm_step = step / (np.mean(step) + 1e-12)\n\n    # Step 4: Compute a weighted combination of the average distance and normalized step\n    score = 0.45 * avg_dists + 0.55 * norm_step\n\n    # Step 5: Add a small random noise to the scores\n    noise = np.random.uniform(-1e-6, 1e-6, size=score.shape)\n    score += noise\n\n    # Step 6: Choose the node with the minimum score (using a deterministic tie\u2011breaking)\n    return int(unv[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter15_idx0",
+    "iteration": 15,
+    "score": -7.560646801096157,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n\n    d_cur = distance_matrix[current_node, candidates]\n    d_des = distance_matrix[candidates, destination_node]\n    d_pair = distance_matrix[np.ix_(candidates, candidates)].copy()\n\n    # Determine the most\u2011central candidate\n    center_score = np.median(d_pair, axis=1)\n\n    # Compute the weighted score\n    score = 0.6 * d_cur + 0.3 * d_des + 0.1 * center_score\n    return int(candidates[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter16_idx2",
+    "iteration": 16,
+    "score": -7.6048695959709445,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv].copy()\n    d_dest = distance_matrix[unv, destination_node].copy()\n\n    n = int(unv.size)\n    k = max(1, int(np.ceil(0.15 * n)))\n    topk = np.partition(step, k - 1)[:k]\n    topk = np.median(topk) * 0.95\n\n    step = np.clip(step, a_min=0, a_max=None)\n    step[step < topk] = topk\n\n    # Add a deterministic noise for tie\u2011breaking\n    noise = 1e-6 * np.arange(unv.size)\n    score = (step / (step + d_dest + 1e-12)) + noise\n    score = np.clip(score, a_min=0, a_max=None)\n\n    return int(unv[np.argmin(score)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter8_idx2",
+    "iteration": 8,
+    "score": -7.951771309542668,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n\n    # distance matrix between candidate nodes\n    D = distance_matrix[np.ix_(cand, cand)].copy()\n\n    # greedy step: current node to each candidate\n    step = distance_matrix[current_node, cand].copy()\n\n    # distance matrix between each candidate and destination\n    dst = distance_matrix[cand, destination_node].copy()\n\n    # score: step + dst + 0.3 * (step + dst) / (step + dst + 1e-12)\n    score = step + dst + 0.3 * (step + dst) / (step + dst + 1e-12)\n\n    # weighted average (with 0.3 as weight)\n    weight = 0.3 * (step + dst) / (step + dst + 1e-12)\n\n    # soft\u2011min: add small epsilon to avoid zero and use logsumexp\n    eps = 1e-10\n    soft_min = -np.log(np.sum(np.exp(-score / eps)) + eps)\n\n    # determine top\u2011k candidates (k=5)\n    k = 5\n    if cand.size > k:\n        top_idx = np.argpartition(score, k-1)[:k]\n    else:\n        top_idx = np.arange(cand.size)\n\n    # weighted average among top candidates\n    top_score = score[top_idx]\n    top_weight = weight[top_idx]\n    weighted_avg = (top_score * top_weight).sum() / (top_weight.sum() + eps)\n\n    # deterministic noise\n    noise = np.arange(len(top_idx)) * 1e-7\n    weighted_avg += noise\n\n    # deterministic choice among top candidates\n    idx = np.argmin(weighted_avg)\n    return int(cand[int(top_idx[idx])])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter18_idx0",
+    "iteration": 18,
+    "score": -7.975142975404195,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    # Step 1: Compute pairwise distances between candidates\n    D = dist_mat[np.ix_(cand, cand)].copy()\n\n    # Step 2: Compute distance to current and destination\n    d_cur = dist_mat[current_node, cand]\n    d_dest = dist_mat[cand, destination_node]\n\n    # Step 3: Compute a weighted score combining distance to current, destination, and candidate proximity\n    score = d_cur + 0.6 * d_dest + 0.4 * D.mean(axis=1)\n\n    # Step 4: Add a small noise to break ties\n    noise = 1e-6 * np.random.rand(score.size)\n    score += noise\n\n    # Step 5: Softmin (capped at 100% to avoid numerical issues)\n    exp_score = np.exp(-score)\n    exp_sum = np.sum(exp_score)\n    prob = np.clip(exp_score / exp_sum, 0, 1)\n\n    # Step 6: Choose the index of the node with the highest probability\n    idx = int(np.argmax(prob))\n\n    return int(cand[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter8_idx0",
+    "iteration": 8,
+    "score": -8.317335611595869,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n    n_total = int(distance_matrix.shape[0])\n    n_unv = int(unv.size)\n\n    if n_unv == 0:\n        return int(destination_node)\n\n    # Determine the progress ratio\n    progress = float(n_unv / max(1, n_total))\n\n    # Clamped progress ratio\n    progress_clamped = np.clip(progress, 0.0, 1.0)\n\n    # Determine the distance to destination for each unvisited node\n    dst = distance_matrix[unv, destination_node]\n\n    # Scale factor based on progress\n    scale = 1.2 + 2.0 * progress_clamped\n\n    # Weighted scores: distance to destination (scaled) + distance to current\n    score = dst + step * 0.75\n    score = score / (np.clip(np.std(score) + 1e-12, 1e-12, None))\n\n    # Softmin with deterministic temperature\n    temperature = 0.5 + 0.5 * progress_clamped\n    exp_neg = np.exp(-score / temperature)\n    probs = exp_neg / (np.sum(exp_neg) + 1e-12)\n\n    # Deterministic noise for tie\u2011breaking\n    noise = np.random.uniform(0, 1e-6, size=unv.size)\n    probs += noise\n\n    # Softmax to select the next node\n    probs = probs / (np.sum(probs) + 1e-12)\n    next_node = unv[np.argmax(probs)]\n\n    # Choose next node based on the probability distribution\n    return int(next_node)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter3_idx3",
+    "iteration": 3,
+    "score": -8.693747573897726,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n    step = np.clip(step, 0, np.inf)\n\n    n_total = int(distance_matrix.shape[0])\n    n_unv = int(unv.size)\n    progress = 1.0 - (n_unv / max(1, n_total))\n\n    # Normalize the step cost\n    step_norm = step / (np.mean(step) + 1e-12)\n\n    # Normalize the progress\n    progress_norm = progress / (np.mean(progress) + 1e-12)\n\n    # Weighted score\n    weight = 0.7\n    score = weight * step_norm + (1.0 - weight) * progress_norm\n\n    # Add deterministic noise\n    noise = np.random.normal(0.0, 0.1, score.shape)\n    score += noise\n\n    # Top\u2011k selection (k=5)\n    top_k = 5\n    top_k_idx = np.argsort(score)[:top_k]\n    chosen = int(unv[top_k_idx[np.argmin(score[top_k_idx])]])\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter0_idx4",
+    "iteration": 0,
+    "score": -9.03450479556053,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, cand]\n\n    # Pairwise distances for the candidate set\n    D = distance_matrix[np.ix_(cand, cand)].copy()\n\n    # Use a weighted sum to determine the score\n    # The weights are chosen to balance the distance to current node and the internal distances\n    # between candidates\n    w1 = 0.4\n    w2 = 0.6\n    score = d_cur * w1 + (np.mean(D, axis=1) + 1e-12) * w2\n\n    # Soft\u2011min selection with epsilon and temperature\n    epsilon = 1e-6\n    temp = 0.5\n    probs = np.exp(-score / (temp * (np.max(score) - np.min(score) + epsilon)))\n    probs = probs / (np.sum(probs) + epsilon)\n\n    # Deterministic random choice based on probabilities\n    chosen = np.argmax(probs)\n    return int(cand[chosen])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter3_idx2",
+    "iteration": 3,
+    "score": -9.050040502914312,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename variables\n    cand = unvisited_nodes.astype(int)\n    dist = distance_matrix\n\n    # Step 1: Compute distances to the current node and destination node\n    d_curr = dist[current_node, cand]\n    d_dest = dist[cand, destination_node]\n\n    # Step 2: Compute the distance from each candidate to the destination node\n    d_to_dest = dist[cand, destination_node]\n\n    # Step 3: Compute the distance between the current node and each candidate node\n    d_to_curr = dist[current_node, cand]\n\n    # Step 4: Compute the distance between each candidate and the destination node\n    d_to_dest = dist[cand, destination_node]\n\n    # Step 5: Compute the distance between the current node and each candidate node\n    d_to_curr = dist[current_node, cand]\n\n    # Step 6: Normalize the distances to avoid overflow\n    d_to_dest_norm = d_to_dest / (np.max(d_to_dest) + 1e-12)\n    d_to_curr_norm = d_to_curr / (np.max(d_to_curr) + 1e-12)\n\n    # Step 7: Compute the weighted sum of distances\n    score = 0.7 * d_to_dest_norm + 0.3 * d_to_curr_norm\n\n    # Step 8: Add a small epsilon to avoid division by zero\n    eps = 1e-12\n    score = score + eps\n\n    # Step 9: Choose the candidate with the lowest score\n    chosen_idx = int(np.argmin(score))\n    return int(cand[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter6_idx2",
+    "iteration": 6,
+    "score": -9.323349048701814,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n\n    # Pre\u2011compute the next\u2011node distance matrix\n    D = distance_matrix[np.ix_(unv, unv)]\n\n    # Use a weighted combination of step and pair distances\n    weight = 0.7\n    score = weight * step + (1.0 - weight) * (D.sum(axis=1) + D.sum(axis=0))\n\n    # Soft\u2011min: pick top two values\n    top2 = np.partition(score, 1)[:2]\n    prob = np.exp(-top2 / (np.max(top2) + 1e-12))\n    prob = prob / (np.sum(prob) + 1e-12)\n\n    # Random selection from the top two\n    choice = np.random.choice(2, p=prob)\n    return int(unv[int(choice)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter1_idx3",
+    "iteration": 1,
+    "score": -11.021137605091859,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n    D = distance_matrix[np.ix_(cand, cand)].copy()\n\n    # Add a small epsilon to avoid division by zero\n    eps = 1e-12\n    D = np.clip(D, 0, None)\n\n    # Use a weighted sum of distance and detour\n    detour = np.sum(D, axis=1) / (np.sum(D) + eps)\n    score = step + 0.75 * detour\n\n    # Softmax for probabilistic selection\n    T = 3.0\n    exp_scores = np.exp(-score / T)\n    probs = exp_scores / (np.sum(exp_scores) + eps)\n\n    # Randomly select one of the top three candidates\n    top_indices = np.argsort(score)[:3]\n    chosen_idx = np.random.choice(top_indices)\n\n    return int(cand[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter0_idx0",
+    "iteration": 0,
+    "score": -11.152647682986588,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    # Distance to the current node\n    d_cur = dist_mat[current_node, candidates]\n    # Distance to the destination node\n    d_dest = dist_mat[candidates, destination_node]\n    # Betweenness centrality (precomputed)\n    betweenness = np.full_like(candidates, 0.0)\n    # Precompute the distance matrix between all candidate pairs\n    d_pair = np.linalg.norm(dist_mat[np.newaxis, :, candidates][:, :, np.newaxis], axis=1)\n    # Sum of distances to all other nodes\n    sum_dist = np.sum(dist_mat[candidates, :], axis=1)\n\n    # Normalised distances\n    norm_d_cur = d_cur / (np.max(d_cur) + 1e-12)\n    norm_d_dest = d_dest / (np.max(d_dest) + 1e-12)\n    norm_pair = d_pair / (np.max(d_pair) + 1e-12)\n    norm_sum = sum_dist / (np.max(sum_dist) + 1e-12)\n\n    # Weighted scoring\n    score = 0.35 * norm_d_cur + 0.35 * norm_d_dest + 0.30 * norm_pair\n    score += 0.001 * norm_sum\n\n    # Softmax temperature\n    T = 1.0\n    exp_scores = np.exp(-score / T)\n    probs = exp_scores / np.sum(exp_scores)\n\n    # Deterministic choice with random noise\n    noise = np.random.uniform(0, 0.01, size=probs.shape)\n    probs += noise\n    probs = probs / np.sum(probs)\n\n    # Deterministic selection\n    chosen_idx = int(np.argmax(probs))\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter11_idx2",
+    "iteration": 11,
+    "score": -11.541983809553102,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n    step = np.clip(step, 0, None)\n\n    # find best next node\n    best = int(unv[0])\n    best_score = step[0] + 0.2 * np.mean(distance_matrix[unv])\n\n    for i, u in enumerate(unv):\n        dist = distance_matrix[current_node, u]\n        mean = np.mean(distance_matrix[u, unv[:i+1]])\n        score = dist + 0.2 * mean\n        if score < best_score:\n            best = int(u)\n            best_score = score\n\n    # deterministic tie\u2011breaking using seed\n    rng = np.random.default_rng(seed=42)\n    best = int(unv[rng.choice(unv.shape[0])])\n\n    return int(best)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter10_idx2",
+    "iteration": 10,
+    "score": -13.583518283814984,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n\n    d_cur = distance_matrix[current_node, cand]\n    d_dest = distance_matrix[cand, destination_node]\n    d_pair = distance_matrix[cand, cand]\n\n    # Normalize the distances\n    d_cur = d_cur / (np.max(d_cur) + 1e-12)\n    d_dest = d_dest / (np.max(d_dest) + 1e-12)\n    d_pair = d_pair / (np.max(d_pair) + 1e-12)\n\n    # Compute a weighted sum\n    score = 0.4 * d_cur + 0.4 * d_dest + 0.2 * d_pair\n\n    # Soft\u2011min to select among top_k candidates\n    top_k = 5\n    top_idx = np.argsort(score)[:top_k]\n    if top_idx.size > 0:\n        top_score = score[top_idx]\n        probs = np.exp(-top_score / (1.0e-6 + np.max(top_score)))\n        probs = probs / (np.sum(probs) + 1e-12)\n        chosen = np.random.choice(top_idx, p=probs)\n    else:\n        chosen = cand[0]\n\n    return int(cand[int(chosen)])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter11_idx0",
+    "iteration": 11,
+    "score": -13.595907576120805,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, candidates]\n\n    step = d_cur.mean()\n    k = 1 + int(np.ceil(candidates.size / 5.0))\n\n    d_mat = distance_matrix[np.ix_(candidates, candidates)]\n    d_mat = d_mat + 1e-12  # prevent division by zero\n    D = -np.log(d_mat).mean(axis=1)\n\n    step = step + 1e-12\n    D = D + 1e-12\n    score = D / (step + 1e-12)\n\n    # weighted sum of scores\n    score = 0.6 * score + 0.4 * (step / (step + 1e-12))\n    score = np.clip(score, 0, np.inf)\n\n    # soft\u2011min selection\n    exp_neg = -np.exp(-score / (1.0 + 1e-8))\n    probs = exp_neg / (np.sum(exp_neg) + 1e-12)\n\n    # weighted sum of probabilities\n    probs = 0.6 * probs + 0.4 * (1.0 / (1.0 + 1e-8))\n    probs = np.clip(probs, 0, np.inf)\n\n    # deterministic selection\n    idx = np.argmax(probs)\n    return int(candidates[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter9_idx2",
+    "iteration": 9,
+    "score": -14.01322868678131,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, cand]\n    d_des = distance_matrix[cand, destination_node]\n\n    # Compute pairwise distances between candidate nodes\n    d_pair = distance_matrix[np.ix_(cand, cand)].copy()\n    d_pair[np.diag_indices(d_pair.shape[0])] = 0.0\n\n    # Score: sum of individual distances (d_cur + d_des) plus a penalty based on\n    # the minimum distance among the candidate nodes (to discourage highly connected clusters)\n    penalty = np.min(d_pair, axis=1).reshape(-1)\n\n    score = d_cur + d_des + 0.3 * penalty\n\n    # Add a small epsilon to avoid division by zero\n    eps = 1e-12\n    probs = np.exp(-score / (np.mean(score) + eps))\n    probs /= np.sum(probs) + eps\n\n    # Randomly select one of the top\u2011k candidates (k=5) with probabilities proportional to their scores\n    k = 5\n    top_indices = np.argsort(score)[:k]\n    chosen_idx = int(np.random.choice(top_indices, p=probs[top_indices] / np.sum(probs[top_indices])))\n    return int(cand[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter6_idx0",
+    "iteration": 6,
+    "score": -14.360550086748741,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename variables to avoid naming conflicts\n    cand = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, cand]\n    d_des = distance_matrix[cand, destination_node]\n\n    # Compute the sum of distances to the current and destination nodes\n    dist_sum = d_cur + d_des\n\n    # Calculate the median of the distances to the destination\n    med_dest = np.median(d_des)\n    d_des_norm = np.clip(d_des / (med_dest + 1e-12), 0, 1)\n\n    # Compute the median of the distances to the current node\n    med_cur = np.median(d_cur)\n    d_cur_norm = np.clip(d_cur / (med_cur + 1e-12), 0, 1)\n\n    # Compute the mean of the distances to the destination\n    mean_dest = np.mean(d_des)\n    d_des_norm = np.clip(d_des / (mean_dest + 1e-12), 0, 1)\n\n    # Compute the mean of the distances to the current node\n    mean_cur = np.mean(d_cur)\n    d_cur_norm = np.clip(d_cur / (mean_cur + 1e-12), 0, 1)\n\n    # Compute the weighted sum of the distances\n    score = (0.6 * dist_sum + 0.4 * d_cur_norm) - 0.3 * d_des_norm\n\n    # Select the top k candidates (k = 5)\n    top_k = np.argsort(score)[:5]\n    top_k = cand[top_k]\n\n    # Randomly select one of the top k candidates\n    chosen_idx = np.random.choice(top_k)\n    return int(chosen_idx)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter3_idx1",
+    "iteration": 3,
+    "score": -14.631554120337617,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename variables to avoid confusion\n    cand = unvisited_nodes.astype(int)\n    d_mat = distance_matrix\n\n    # Distance to the destination\n    d_curr_dest = d_mat[current_node, destination_node]\n\n    # Distance between current and each candidate\n    d_curr_cand = d_mat[current_node, cand]\n\n    # Distance between each candidate and destination\n    d_cand_dest = d_mat[cand, destination_node]\n\n    # Normalization factor\n    norm = np.linalg.norm(d_cand_dest) + 1e-12\n\n    # Cost matrix\n    cost = (d_curr_cand / norm) + (d_cand_dest / norm)\n\n    # Softmax for top_k candidates\n    k = min(5, len(cand))\n    top_k = cand[np.argpartition(cost, k-1)[:k]]\n\n    # Softmax over top_k candidates\n    exp_cost = np.exp(-cost[np.isin(cand, top_k)])\n    probs = exp_cost / (np.sum(exp_cost) + 1e-12)\n\n    # Weighted random selection\n    idx = np.random.choice(len(top_k), p=probs)\n    return int(top_k[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter6_idx4",
+    "iteration": 6,
+    "score": -15.752800576449637,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    dist = distance_matrix[np.ix_(cand, cand)].copy()\n\n    d_cur = distance_matrix[current_node, cand]\n    d_pair = distance_matrix[cand, destination_node]\n\n    # Normalised scores with a small epsilon to avoid division by zero\n    eps = 1e-12\n    score = (d_pair + eps) / (d_cur + eps)\n    score = np.clip(score, 0.0, 1.0)\n\n    # Deterministic sampling: select the 10% of best candidates\n    k = max(1, int(0.10 * len(cand)))\n    top_k = np.argpartition(score, -k)[-k:]\n\n    # Weighted sum with small random noise to break ties\n    noise = 1e-7 * np.random.randn(len(top_k))\n    weighted_sum = np.sum(score[top_k] * (0.75 + 0.25 * noise), axis=0)\n\n    # Deterministic choice among top_k\n    chosen_idx = int(np.argmin(weighted_sum))\n    return int(cand[int(top_k[chosen_idx])])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter7_idx2",
+    "iteration": 7,
+    "score": -16.984438721509115,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n    n = int(unv.size)\n    m = int(unv.size)\n\n    if n == 1:\n        return int(unv[0])\n\n    # Compute cost matrix\n    D = distance_matrix[np.ix_(unv, unv)].copy()\n    D = D + 1e-6 * np.abs(D)  # small noise to prevent zero division\n\n    # Weighted cost: step + 0.25 * (sum of distances)\n    cost = step + 0.25 * np.sum(D, axis=1)\n\n    # Normalize cost for deterministic sampling\n    cost_norm = cost / (np.max(cost) + 1e-12)\n\n    # Deterministic choice: top\u2011k sampling with noise\n    k = np.clip(int(np.sqrt(m)), 1, m)\n    indices = np.argsort(cost_norm)[:k]\n    chosen = np.random.choice(indices)\n    return int(unv[chosen])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter11_idx4",
+    "iteration": 11,
+    "score": -20.715443035860133,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv].copy()\n\n    n = int(unv.size)\n    k = max(0, int(np.ceil(n * 0.35)))\n    if k == 0:\n        k = 1\n\n    # Top\u2011k nearest neighbours\n    top_k = np.partition(step, k - 1)[:k]\n    # Use the average distance from the top_k\n    avg_dist = np.mean(top_k)\n    # Add a small epsilon to avoid division by zero\n    epsilon = 1e-12\n    avg_dist = avg_dist + epsilon\n\n    # Normalize distances for the top_k\n    norm_step = step / (np.max(step) + epsilon)\n    norm_step = np.clip(norm_step, 0, 1)\n\n    # Select the top\u2011k indices\n    top_k_indices = np.argpartition(norm_step, k - 1)[:k]\n    top_k_dist = step[top_k_indices]\n\n    # Weighted score: 0.7\u00d7distance + 0.3\u00d7(1 \u2212 distance / avg_dist)\n    score = 0.7 * top_k_dist + 0.3 * (1.0 - top_k_dist / avg_dist)\n\n    # Deterministic choice: use the top score\n    chosen_idx = np.argmin(score)\n    return int(unv[top_k_indices[chosen_idx]])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter11_idx3",
+    "iteration": 11,
+    "score": -23.586323823217437,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n\n    D = distance_matrix[np.ix_(unv, unv)].copy()\n    np.fill_diagonal(D, np.inf)\n\n    n = unv.size\n    k = 1 + int(np.clip((n * 0.65), 0, n))\n    m = np.partition(D, k - 1, axis=1)[:, :k].sum(axis=1)\n\n    score = 0.4 * step + 0.6 * m\n    return int(unv[int(np.argmin(score))])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter14_idx1",
+    "iteration": 14,
+    "score": -24.514514814127438,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    dist = distance_matrix[current_node, cand]\n    d_dest = distance_matrix[cand, destination_node]\n\n    # Determine the step size\n    step = np.clip(dist / (np.median(dist) + 1e-12), 0, 1)\n\n    # Compute the score using a weighted sum\n    score = 0.6 * (step) + 0.4 * (d_dest)\n    score = np.clip(score, 0, 1)\n\n    # Apply deterministic noise (seeded with index)\n    noise = np.arange(score.size) * 1e-7\n    score += noise\n\n    # Soft\u2011min selection\n    min_score = np.min(score)\n    exp_score = np.exp(-score / (np.std(score) + 1e-12))\n    probs = exp_score / np.sum(exp_score)  # normalize\n\n    # Deterministic selection: pick the one with the lowest score\n    selected = int(cand[np.argmin(score)])\n\n    # Add a small deterministic bias to the selection\n    bias = np.clip(selected - int(cand[0]), -1, 1)\n    selected = int(cand[int((selected + bias) % cand.size)])\n\n    return int(selected)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter4_idx0",
+    "iteration": 4,
+    "score": -24.558468531910695,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    # Distance to current node\n    d_cur = dist_mat[current_node, candidates]\n\n    # Distance to destination node\n    d_dest = dist_mat[candidates, destination_node]\n\n    # Pairwise distances between candidates\n    d_pair = dist_mat[np.ix_(candidates, candidates)].copy()\n\n    # Score: weighted sum of distance to current, distance to destination, and a penalty based on pairwise distances\n    score = 0.6 * d_cur + 0.3 * d_dest + 0.1 * d_pair.sum(axis=1) + 1e-12\n\n    # Deterministic noise: add a small random noise (seedable)\n    noise = np.random.uniform(0, 1e-6, size=score.shape)\n    score += noise\n\n    # Soft\u2011min operation (deterministic sampling)\n    min_score = score.min()\n    exp_scores = np.exp(-score + min_score)\n    probs = exp_scores / (np.sum(exp_scores) + 1e-12)\n    chosen = int(np.random.choice(candidates, p=probs))\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter15_idx1",
+    "iteration": 15,
+    "score": -24.610396845319457,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n\n    # Step 1: Compute distances to the current node\n    d_cur = distance_matrix[current_node, candidates]\n\n    # Step 2: Compute distances between each candidate pair\n    d_pair = distance_matrix[np.ix_(candidates, candidates)].copy()\n\n    # Step 3: Compute distances to the destination node\n    d_dest = distance_matrix[candidates, destination_node]\n\n    # Step 4: Compute the sum of the two distances\n    sum_dist = d_cur + d_dest\n\n    # Step 5: Compute the average of the pairwise distances\n    avg_pair = np.mean(d_pair, axis=1)\n\n    # Step 6: Compute the score for each candidate\n    # Use a weighted combination of the distances and the average pairwise distance\n    score = 0.6 * sum_dist + 0.4 * avg_pair\n\n    # Add a small epsilon to avoid division by zero\n    epsilon = 1e-12\n    score = score / (np.mean(score) + epsilon)\n\n    # Soft\u2011max temperature to create a deterministic choice\n    T = 1.0\n    prob = np.exp(-score / T)\n    prob = prob / (np.sum(prob) + epsilon)\n\n    # Randomly select one candidate based on the probabilities\n    chosen_idx = np.random.choice(len(candidates), p=prob)\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter1_idx2",
+    "iteration": 1,
+    "score": -24.661040028399405,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename to avoid confusion with the destination\n    candidates = unvisited_nodes.astype(int)\n\n    # Extract the submatrix for the current node and candidate nodes\n    d_cur = distance_matrix[current_node, candidates]\n    d_dest = distance_matrix[candidates, destination_node]\n    d_pair = distance_matrix[candidates[:, None], candidates]\n\n    # Compute the median distance to the current node\n    med_d_cur = np.median(d_cur)\n    # Compute the median distance to the destination\n    med_d_dest = np.median(d_dest)\n\n    # Normalise distances using the median values\n    d_norm = (d_cur / (med_d_cur + 1e-12)) + (d_dest / (med_d_dest + 1e-12))\n\n    # Compute the median distance between each pair of candidate nodes\n    med_d_pair = np.median(d_pair, axis=1)\n    # Use the median distance as a penalty\n    penalty = med_d_pair\n\n    # Weighted sum of normalised distances and penalty\n    score = 0.7 * d_norm + 0.3 * penalty\n\n    # Soft\u2011max temperature to introduce randomness in the selection\n    T = 2.0\n    probs = np.exp(-score / T)\n    probs /= np.sum(probs) + 1e-12\n\n    # Randomly select a candidate based on the probabilities\n    chosen_idx = np.random.choice(len(candidates), p=probs)\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter7_idx1",
+    "iteration": 7,
+    "score": -24.73745916305797,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    d_cur = dist_mat[current_node, cand]\n    d_dest = dist_mat[cand, destination_node]\n    d_pair = dist_mat[cand, cand]\n\n    # Normalize by maximum distance\n    max_dist = np.max(dist_mat) + 1e-12\n    d_cur_norm = d_cur / max_dist\n    d_dest_norm = d_dest / max_dist\n    d_pair_norm = d_pair / max_dist\n\n    # Weighted sum\n    score = 0.6 * d_cur_norm + 0.2 * d_dest_norm + 0.2 * d_pair_norm\n\n    # Softmin: add small noise and apply softmax\n    noise = 1e-10 * np.random.rand(score.size)\n    score = score + noise\n    exp_score = np.exp(-score)\n    probs = exp_score / np.sum(exp_score)\n    chosen = np.random.choice(cand, p=probs)\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter17_idx1",
+    "iteration": 17,
+    "score": -24.980021522342746,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Distance to destination\n    d_dest = distance_matrix[current_node, destination_node]\n\n    # Candidate nodes\n    cand = unvisited_nodes.astype(int)\n\n    # Compute distances from current node to each candidate\n    d_cand = distance_matrix[current_node, cand]\n\n    # Compute distances between each pair of candidate nodes\n    d_pair = distance_matrix[np.ix_(cand, cand)].copy()\n\n    # Normalisation\n    d_cand = d_cand / (d_cand.mean() + 1e-12)\n    d_pair = d_pair / (d_pair.mean() + 1e-12)\n\n    # Deterministic noise\n    noise = 1e-6 * np.arange(d_cand.size, dtype=float)\n    d_cand += noise\n    d_pair += noise\n\n    # Add a small constant to avoid zero division\n    eps = 1e-12\n    d_cand = np.clip(d_cand, eps, None)\n    d_pair = np.clip(d_pair, eps, None)\n\n    # Combine the scores using a weighted average\n    score = 0.8 * d_cand + 0.2 * (d_pair.sum(axis=1))\n\n    # Soft\u2011min selection with temperature\n    T = 2.0\n    probs = np.exp(-score / T)\n    probs = probs / (probs.sum() + 1e-12)\n\n    # Deterministic choice via random sampling\n    chosen_idx = np.random.choice(cand.size, p=probs)\n    return int(cand[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter18_idx3",
+    "iteration": 18,
+    "score": -25.12771876323327,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    d_cur = distance_matrix[current_node, unv]\n\n    step = d_cur\n    step += 0.005 * (unv - current_node) ** 2\n    step = np.clip(step, a_min=0, a_max=None)\n\n    # In the loop, the first step is a deterministic choice\n    # The rest are chosen probabilistically\n    if step.size > 1:\n        prob = np.exp(-step / (np.mean(step) + 1e-10))\n        prob = np.clip(prob, a_min=1e-12, a_max=None)\n        prob = prob / (np.sum(prob) + 1e-12)\n        chosen = np.random.choice(unv, p=prob)\n    else:\n        chosen = unv[0]\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter2_idx0",
+    "iteration": 2,
+    "score": -25.232423580032,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    # Compute distances from current node to candidates\n    curr_to_cand = dist_mat[current_node, candidates]\n\n    # Compute distances from candidates to destination\n    cand_to_dest = dist_mat[candidates, destination_node]\n\n    # Compute distances between candidates\n    cand_pair = dist_mat[candidates[:, None], candidates]\n    mean_cand_pair = np.mean(cand_pair, axis=1)\n\n    # Compute scores using a weighted combination\n    score = 0.6 * curr_to_cand + 0.2 * cand_to_dest + 0.2 * mean_cand_pair\n\n    # Softmin with temperature\n    temp = 1.0\n    exp_scores = np.exp(-score / temp)\n    norm = np.sum(exp_scores) + 1e-12\n    probs = exp_scores / norm\n\n    # Random selection with probabilities\n    chosen_idx = np.random.choice(len(candidates), p=probs)\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter16_idx0",
+    "iteration": 16,
+    "score": -25.422990225596806,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    unv = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, unv]\n\n    # Determine the target distance\n    d = distance_matrix[destination_node, unv]\n    target = np.mean(d) * 0.95\n\n    # Compute the relative deviation\n    rel_dev = np.abs(step - target) / (target + 1e-12)\n\n    # Add a deterministic noise (seeded)\n    noise = np.arange(unv.size) * 1e-6\n    rel_dev += noise\n\n    # Select the node with the smallest relative deviation\n    idx = int(np.argmin(rel_dev))\n\n    return int(unv[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter7_idx4",
+    "iteration": 7,
+    "score": -25.91373600077852,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    d = distance_matrix[np.ix_(cand, cand)].astype(float)\n\n    n_total = int(distance_matrix.shape[0])\n    n_rem  = int(cand.size)\n\n    if n_rem == 1:\n        return int(cand[0])\n\n    progress = (n_rem / max(1, n_total)) ** 0.75\n    progress = np.clip(progress, 0.0, 1.0)\n\n    # Add small epsilon to avoid division by zero\n    eps = 1e-12\n    d_norm = d / (np.sum(d, axis=1, keepdims=True) + eps)\n    d_norm = d_norm / (np.sum(d_norm, axis=1, keepdims=True) + eps)\n\n    # Weighted score\n    score = 0.4 * (1 - progress) + 0.6 * (d_norm.mean(axis=1))\n\n    # Deterministic noise\n    noise = np.arange(cand.size) * 1e-7\n    score += noise\n\n    # Softmin selection\n    T = 10.0\n    exp_scores = np.exp(-score / T)\n    probs = exp_scores / (np.sum(exp_scores) + eps)\n\n    chosen = np.random.choice(cand, p=probs)\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter0_idx3",
+    "iteration": 0,
+    "score": -26.191460547307074,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n    dest = distance_matrix[cand, destination_node]\n\n    # Normalize with clip to avoid division by zero\n    step_norm = step / (np.clip(np.max(step), 1e-12, None) + 1e-12)\n    dest_norm = dest / (np.clip(np.max(dest), 1e-12, None) + 1e-12)\n\n    # Softmax with temperature to introduce randomness\n    temp = 1.5\n    score = -np.exp(-temp * (step_norm + 0.25 * dest_norm))\n    score = np.clip(score, -1e12, 1e12)\n\n    # Weighted sum of the scores\n    w = 0.7\n    probs = np.exp(-w * score)\n    probs /= (np.sum(probs) + 1e-12)\n\n    # Deterministic random choice with seed\n    seed = int(current_node) + int(destination_node) + int(unvisited_nodes.size)\n    rng = np.random.default_rng(seed)\n    chosen = int(cand[rng.choice(cand.size, p=probs)])\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter9_idx3",
+    "iteration": 9,
+    "score": -26.369227118391574,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n\n    # distance_matrix is already in float format\n    D = distance_matrix[np.ix_(cand, cand)].copy()\n\n    # Use the mean of the row-wise distances\n    row_mean = np.mean(D, axis=1)\n\n    # Use the median of the column-wise distances\n    col_median = np.median(D, axis=0)\n\n    # Combine row_mean and col_median with a weighted sum\n    score = 0.6 * row_mean + 0.4 * col_median\n\n    # Add a small epsilon to avoid division by zero\n    epsilon = 1e-10\n    score += 1e-6 * np.log(1.0 + np.sum(D, axis=1) + epsilon)\n\n    # Softmax temperature\n    T = 0.7\n    probs = np.exp(-score / (T * (np.mean(score) + epsilon)))\n\n    # Randomly select one index with probability proportional to the scores\n    idx = int(np.random.choice(len(probs), p=probs / np.sum(probs)))\n    return int(cand[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter3_idx4",
+    "iteration": 3,
+    "score": -26.637335633316205,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    step = distance_matrix[current_node, cand]\n    dist = distance_matrix[np.ix_(cand, cand)].copy()\n\n    n = cand.size\n    if n <= 1:\n        return int(cand[0])\n\n    # Compute the mean and variance of distances between candidate pairs\n    mean = np.mean(dist, axis=1)\n    var = np.var(dist, axis=1)\n\n    # Normalize to [0, 1] range\n    mean_norm = (mean - mean.min()) / (mean.max() - mean.min() + 1e-12)\n    var_norm = (var - var.min()) / (var.max() - var.min() + 1e-12)\n\n    # Weighted score\n    score = 0.85 * (mean_norm + 0.2 * var_norm)\n\n    # Random choice among top\u2011k candidates\n    top_k = min(5, n)\n    top_indices = np.argsort(score)[:top_k]\n    chosen = np.random.choice(top_indices)\n\n    return int(cand[chosen])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter2_idx1",
+    "iteration": 2,
+    "score": -29.92616021826506,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Clipping to avoid overflow\n    step = np.clip(distance_matrix[current_node, destination_node], 0, None)\n    step = np.clip(step, 0, 1e12)\n\n    cand = unvisited_nodes.astype(int)\n    D   = distance_matrix[np.ix_(cand, cand)].copy()\n\n    # Compute geometric mean of distances\n    D_mean = np.mean(D, axis=1)\n    D_mean = np.clip(D_mean, 0, 1e12)\n\n    # Normalised score\n    score = np.log(step) / (np.log(1 + D_mean) + 1e-12)\n\n    # Soft\u2011min with deterministic noise\n    noise = 1e-7 * np.arange(score.size)\n    score = score + noise\n\n    # Deterministic selection\n    idx = np.argmin(score)\n    return int(cand[idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter19_idx1",
+    "iteration": 19,
+    "score": -30.986766219989573,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    # Rename for clarity\n    cand = unvisited_nodes.astype(int)\n    d_mat = distance_matrix\n\n    # Distance to destination\n    dist_to_dest = d_mat[current_node, destination_node]\n\n    # Distance between candidates\n    d_cand = d_mat[np.ix_(cand, cand)].copy()\n\n    # Normalise with maximum\n    d_cand = d_cand / (d_cand.max() + 1e-12)\n\n    # Score: weighted sum of distance to destination and candidate distances\n    score = 0.6 * dist_to_dest + 0.4 * d_cand.mean(axis=1)\n\n    # Add deterministic noise to break ties\n    noise = np.arange(len(score)) * 1e-6\n    score += noise\n\n    # Determine top\u2011k candidates\n    top_k = min(5, len(score))\n    top_indices = np.argpartition(score, top_k - 1)[:top_k]\n\n    # Select the one with lowest score\n    chosen = int(cand[top_indices[np.argmin(score[top_indices])]])\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter14_idx2",
+    "iteration": 14,
+    "score": -31.510188272797834,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    d_cur = dist_mat[current_node, candidates]\n    d_dest = dist_mat[candidates, destination_node]\n\n    # Score: minimum of distances to current and destination\n    score = np.minimum(d_cur, d_dest)\n\n    # Weighted sum: 0.7 * score + 0.3 * (d_cur / (d_cur + 1e-12))\n    weight = 0.7 * score + 0.3 * (d_cur / (d_cur + 1e-12))\n\n    # Deterministic noise: add a small random perturbation\n    noise = 1e-8 * np.arange(candidates.size)\n    noise = np.clip(noise, -1e-8, 1e-8)\n    noise = np.cos(candidates * 1337) * noise\n    score += noise\n\n    # Soft\u2011min with temperature\n    T = 1.5\n    exp_score = np.exp(-score / T)\n    probs = exp_score / (np.sum(exp_score) + 1e-12)\n\n    # Random choice with probabilities\n    rng = np.random.default_rng(seed=42)\n    chosen_idx = rng.choice(candidates.size, p=probs)\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter12_idx1",
+    "iteration": 12,
+    "score": -33.754872566211276,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    candidates = unvisited_nodes.astype(int)\n    dist_mat = distance_matrix\n\n    # Step 1: Compute distances to current and destination\n    curr_to_cand = dist_mat[current_node, candidates]\n    cand_to_dest = dist_mat[candidates, destination_node]\n\n    # Step 2: Compute a weighted score\n    score = 0.6 * curr_to_cand + 0.4 * cand_to_dest\n\n    # Step 3: Compute the total distance to the destination for each candidate\n    total_dist = np.sum(dist_mat[candidates, destination_node])\n\n    # Step 4: Add a small noise to the scores to avoid deterministic tie\u2011breaking\n    noise = np.random.normal(0, 1e-6, size=score.shape)\n    score += noise\n\n    # Step 5: Compute the softmax of the scores\n    exp_scores = np.exp(-score)\n    exp_sum = np.sum(exp_scores)\n    probs = exp_scores / (np.clip(exp_sum, 1e-12, None) + 1e-12)\n\n    # Step 6: Select the candidate with the lowest probability (most likely to be chosen)\n    chosen_idx = np.argmin(probs)\n\n    return int(candidates[chosen_idx])\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter8_idx4",
+    "iteration": 8,
+    "score": -35.85450182978367,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    dist_mat = distance_matrix\n    n = unvisited_nodes.size\n    if n <= 1:\n        return int(unvisited_nodes[0])\n\n    step = dist_mat[current_node, unvisited_nodes]\n    step = np.clip(step, 0, np.inf)\n\n    # Find the closest unvisited node to the destination\n    dest = dist_mat[unvisited_nodes, destination_node]\n    best = unvisited_nodes[np.argmin(dest)]\n    dest = dist_mat[best, destination_node]\n\n    # Determine the best step size\n    best_step = step[np.argmin(step)]\n    step = np.clip(step, 0, np.inf)\n    step = np.exp(-step / (np.mean(step) + 1e-12))\n\n    # Compute the score using a weighted sum\n    score = 0.5 * step + 0.5 * dest\n    score = np.clip(score, 0, np.inf)\n    score = np.exp(-score / (np.mean(score) + 1e-12))\n\n    # Normalize for deterministic choice\n    score = score / (np.mean(score) + 1e-12)\n    score = np.clip(score, 0, np.inf)\n\n    # Use a deterministic seed for selection\n    seed = 42\n    np.random.seed(seed)\n    chosen = unvisited_nodes[np.argmax(score)]\n    np.random.seed(seed)\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  },
+  {
+    "program_id": "iter2_idx2",
+    "iteration": 2,
+    "score": -36.33087515710129,
+    "code": "import numpy as np\n\ndef select_next_node(current_node: int, destination_node: int, unvisited_nodes: np.ndarray, distance_matrix: np.ndarray) -> int:\n    if unvisited_nodes.size == 0:\n        return int(destination_node)\n\n    cand = unvisited_nodes.astype(int)\n    d_mat = distance_matrix\n\n    step = d_mat[current_node, cand]\n    D = d_mat[np.ix_(cand, cand)].copy()\n    np.fill_diagonal(D, np.inf)\n\n    D = np.where(D == np.inf, 0, D)\n\n    # Soft\u2011min with epsilon\n    eps = 1e-12\n    step   = step / (step.sum() + eps)\n    D      = D / (D.sum(axis=1, keepdims=True) + eps)\n\n    # Soft\u2011min with epsilon\n    score = (step * D).sum(axis=1)\n    score = np.clip(score, 0, None)\n\n    # Deterministic noise: add random float near 0\n    noise = np.random.rand(score.size) * 1e-8\n    score += noise\n\n    # Pick the top\u2011k candidates with lowest score\n    k = min(5, len(cand))\n    top_k = np.argsort(score)[:k]\n    chosen = cand[top_k[np.argmin(score[top_k])]]\n\n    return int(chosen)\n\n",
+    "function_name": "select_next_node"
+  }
+]
